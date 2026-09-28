@@ -33,28 +33,11 @@ describe("Fly Previews page", () => {
     expect(source).toMatch(/<RunnerManager view="previews" \/>/);
   });
 
-  it("moves PR preview controls from Config into the Previews view", () => {
+  it("keeps preview controls out of the primary Fly Hub manager", () => {
     const source = readFileSync(RUNNER_MANAGER_PATH, "utf8");
-    expect(source).toMatch(/export type RunnerView = .*"previews"/s);
-    expect(source).toMatch(/view === "previews"/);
-    expect(source).toMatch(/<FlyPreviewsList/);
-    expect(source).toMatch(/<PreviewsCard/);
-
-    const previewsBlock = source.match(
-      /function FlyPreviewsView[\s\S]*?export function RunnerManager/,
-    );
-    expect(previewsBlock).not.toBeNull();
-    expect(previewsBlock![0].indexOf("<PreviewsCard")).toBeGreaterThan(-1);
-    expect(previewsBlock![0].indexOf("<FlyPreviewsList")).toBeGreaterThan(-1);
-    expect(previewsBlock![0].indexOf("<PreviewsCard")).toBeLessThan(
-      previewsBlock![0].indexOf("<FlyPreviewsList"),
-    );
-
-    const configBlock = source.match(
-      /function RunnerConfigView[\s\S]*?function FlyPreviewsView/,
-    );
-    expect(configBlock).not.toBeNull();
-    expect(configBlock![0]).not.toMatch(/<PreviewsCard/);
+    expect(source).not.toContain("<PreviewsCard");
+    expect(source).not.toContain("<FlyPreviewsList");
+    expect(source).toContain("<FlyMachinesTable");
   });
 
   it("lists live preview machine details with copy/open icon actions", () => {

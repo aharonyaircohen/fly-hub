@@ -19,7 +19,7 @@ import {
   themeLocalStorageKey,
 } from "@dashboard/providers/Theme/shared";
 import "@dashboard/globals.css";
-import { getKodyAuthToken } from "@dashboard/lib/auth/kody-auth-server";
+import "@dashboard/fly-hub.css";
 
 const assistant = Assistant({
   subsets: ["latin", "hebrew"],
@@ -51,12 +51,11 @@ export const metadata: Metadata = {
   },
 };
 
-export default async function KodyLayout({
+export default function KodyLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const initialAuthToken = await getKodyAuthToken();
   return (
     <html
       className={cn(GeistSans.variable, GeistMono.variable, assistant.variable)}
@@ -93,7 +92,7 @@ export default async function KodyLayout({
         <link href="/favicon.svg" rel="icon" type="image/svg+xml" />
       </head>
       <body>
-        <KodyProviders initialAuthToken={initialAuthToken}>
+        <KodyProviders>
           <FlyShell>{children}</FlyShell>
           <Toaster />
         </KodyProviders>

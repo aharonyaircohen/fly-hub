@@ -20,9 +20,11 @@ type Accent = "sky" | "emerald" | "teal" | "violet" | "amber";
 
 export function MasterDetailShell({
   title,
+  className,
   icon,
   iconClassName,
   subtitle,
+  backHref,
   actions,
   error,
   search,
@@ -38,9 +40,11 @@ export function MasterDetailShell({
   embedded = false,
 }: {
   title: string;
+  className?: string;
   icon: LucideIcon;
   iconClassName?: string;
   subtitle?: string;
+  backHref?: string | null;
   actions?: ReactNode;
   error?: string | null;
   search: string;
@@ -62,13 +66,14 @@ export function MasterDetailShell({
   embedded?: boolean;
 }) {
   return (
-    <div className="h-full bg-black/95 text-white/90 flex flex-col overflow-hidden">
+    <div className={cn("h-full bg-black/95 text-white/90 flex flex-col overflow-hidden", className)}>
       {!embedded ? (
         <PageHeader
           title={title}
           icon={icon}
           iconClassName={iconClassName}
           subtitle={subtitle}
+          backHref={backHref}
           actions={actions}
         />
       ) : null}

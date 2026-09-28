@@ -38,6 +38,7 @@ export function classifyApp(app: string): {
   if (app === "kody-preview-builder" || app.startsWith("fly-builder-"))
     return { feature: "builder", label: app };
   if (app.startsWith("kody-app-")) return { feature: "app", label: app };
+  if (app.startsWith("flyhub-")) return { feature: "other", label: app };
   if (app.startsWith("kody-brain")) return { feature: "brain", label: app };
   if (app.startsWith("kody-browser-"))
     return { feature: "browser", label: app };
@@ -117,7 +118,9 @@ export function rowsForFlyApp(
       name: m.name,
       state: m.state,
       region: m.region,
-      label,
+      label: app.startsWith("flyhub-")
+        ? m.config?.env?.FLY_HUB_NAME || m.name || label
+        : label,
       sizeLabel: sizeLabel(m.guest),
       guest: m.guest,
       imageRef:
@@ -143,6 +146,7 @@ export async function listFlyInventory(
   const apps = allApps.filter(
     (n) =>
       n.startsWith("kp-") ||
+      n.startsWith("flyhub-") ||
       n === "kody-preview-builder" ||
       n === "kody-runner" ||
       n.startsWith("kody-runner") ||

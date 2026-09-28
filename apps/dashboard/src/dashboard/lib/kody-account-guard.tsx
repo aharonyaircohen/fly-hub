@@ -23,7 +23,7 @@ function KodySignIn() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider,
-          callbackURL: new URL("/fly/config", window.location.origin).toString(),
+          callbackURL: new URL("/fly/machines", window.location.origin).toString(),
         }),
       });
       const result = (await response.json().catch(() => null)) as {
@@ -51,7 +51,7 @@ function KodySignIn() {
       const result = await kodyAuthClient.signIn.email({
         email,
         password,
-        callbackURL: "/fly/config",
+        callbackURL: "/fly/machines",
       });
       if (result.error)
         setError("Email login failed. Check the email and password.");

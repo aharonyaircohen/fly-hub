@@ -9,11 +9,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 import { ThemeProvider } from "@dashboard/providers/Theme";
-import { AuthProvider } from "@dashboard/lib/auth-context";
-import { ConvexClientProvider } from "@dashboard/lib/convex/ConvexClientProvider";
-import { InternalLinkNavigation } from "@dashboard/lib/components/InternalLinkNavigation";
-import { kodyAuthClient } from "@dashboard/lib/auth/kody-auth-client";
-import { WebhookRegistrationReconciler } from "@dashboard/lib/webhooks/WebhookRegistrationReconciler";
 
 function makeQueryClient() {
   return new QueryClient({
@@ -39,32 +34,14 @@ function getQueryClient() {
 
 export function KodyProviders({
   children,
-  initialAuthToken,
 }: {
   children: React.ReactNode;
-  initialAuthToken?: string | null;
 }) {
   const queryClient = getQueryClient();
 
   return (
     <QueryClientProvider client={queryClient}>
-      <ConvexClientProvider initialToken={initialAuthToken}>
-        <ThemeProvider>
-          <FlyAccountProviders>{children}</FlyAccountProviders>
-        </ThemeProvider>
-      </ConvexClientProvider>
+      <ThemeProvider>{children}</ThemeProvider>
     </QueryClientProvider>
-  );
-}
-
-function FlyAccountProviders({ children }: { children: React.ReactNode }) {
-  const { data: session } = kodyAuthClient.useSession();
-  if (!session) return <>{children}</>;
-  return (
-    <AuthProvider persistence="account">
-      <WebhookRegistrationReconciler />
-      <InternalLinkNavigation />
-      {children}
-    </AuthProvider>
   );
 }

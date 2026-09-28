@@ -152,11 +152,10 @@ describe("PreviewBrowser new-tab action", () => {
   });
 
   it("shows browser Machines while preserving the stable repository app", () => {
-    expect(FLY_MACHINES_TABLE_SOURCE).toMatch(
-      /const FEATURE_ORDER[\s\S]*"browser"/,
-    );
+    expect(FLY_MACHINES_TABLE_SOURCE).toContain("return (inv?.machines ?? [])");
+    expect(FLY_MACHINES_TABLE_SOURCE).toContain("{filteredRows.map((row) => {");
     expect(FLY_MACHINES_TABLE_SOURCE).toContain(
-      'return feature === "preview" || feature === "preview-base";',
+      'return row.feature === "preview" || row.feature === "preview-base";',
     );
     expect(FLY_MACHINES_TABLE_SOURCE).toContain(
       "The stable repository browser app remains available",

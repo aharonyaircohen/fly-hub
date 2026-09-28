@@ -29,6 +29,7 @@ import {
   serverProviderConfigFromContext,
   resolveServerProviderContext,
 } from "../infrastructure/server-context";
+import { managedMachineAppName } from "../machines/managed";
 
 export const runtime = "nodejs";
 
@@ -78,6 +79,12 @@ export async function POST(req: NextRequest) {
   }
 
   const { app, machineId, action } = parsed.data;
+  if (
+    app.startsWith("flyhub-") &&
+    app !== managedMachineAppName(ctx.context.owner, ctx.context.repo, cfg.orgSlug)
+  ) {
+    return NextResponse.json({ error: "machine_not_found" }, { status: 404 });
+  }
   try {
     switch (action) {
       case "suspend":

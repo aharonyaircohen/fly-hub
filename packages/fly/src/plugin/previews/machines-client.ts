@@ -38,6 +38,13 @@ export interface FlyPreviewConfig {
 export interface CreatePreviewMachineInput {
   /** Runtime image account; defaults to root for the bundled preview images. */
   sshUsername?: string;
+  /** Fly display name, separate from the owning app name. */
+  name?: string;
+  /** Override the image startup process for an SSH-only machine. */
+  startupCommand?: string[];
+  /** A managed machine has no HTTP service; SSH is injected below. */
+  sshOnly?: boolean;
+  sleepWhenIdle?: boolean;
   appName: string;
   region: string;
   image: string;
@@ -131,6 +138,7 @@ async function flyFetch(
   url: string,
   init: RequestInit,
   token: string,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
   const headers = {
     Authorization: `Bearer ${token}`,
@@ -143,7 +151,7 @@ async function flyFetch(
       return await fetch(url, {
         ...init,
         headers,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       lastErr = err;
@@ -239,6 +247,7 @@ export async function createMachine(
 ): Promise<MachineInfo> {
   const internalPort = input.internalPort ?? 8080;
   const body = {
+    ...(input.name ? { name: input.name } : {}),
     region: input.region,
     ...(input.skipServiceRegistration
       ? { skip_service_registration: true }
@@ -247,7 +256,12 @@ export async function createMachine(
       image: input.image,
       env: input.env ?? {},
       auto_destroy: false,
-      restart: { policy: "always" },
+      restart: input.sshOnly
+        ? { policy: "on-failure", max_retries: 3 }
+        : { policy: "always" },
+      ...(input.startupCommand
+        ? { init: { exec: input.startupCommand } }
+        : {}),
       ...(input.files && input.files.length > 0
         ? {
             files: input.files.map((f) => ({
@@ -261,7 +275,7 @@ export async function createMachine(
         cpus: input.cpus ?? 1,
         memory_mb: input.memoryMb ?? 512,
       },
-      services: [
+      services: input.sshOnly ? [] : [
         {
           ports: [
             { port: 443, handlers: ["tls", "http"], force_https: false },
@@ -305,14 +319,26 @@ export async function createMachine(
   // Fly's registry is eventually consistent: a freshly-pushed manifest
   // can return MANIFEST_UNKNOWN for a few seconds. Retry on that
   // specific class of error.
-  const payload = {
-    ...body,
-    config: await prepareMachineSsh({
+  const prepared = await prepareMachineSsh({
       app: input.appName,
       config: body.config,
       cfg,
       username: input.sshUsername,
-    }),
+  });
+  if (input.sshOnly && input.sleepWhenIdle === false) {
+    prepared.services = prepared.services?.map((service) => ({
+      ...service,
+      autostop: false,
+    }));
+  } else if (input.sshOnly && (input.memoryMb ?? 512) > FLY_SUSPEND_MEMORY_LIMIT_MB) {
+    prepared.services = prepared.services?.map((service) => ({
+      ...service,
+      autostop: true,
+    }));
+  }
+  const payload = {
+    ...body,
+    config: prepared,
   };
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt < 6; attempt++) {
@@ -376,6 +402,7 @@ export async function waitForMachineStarted(
     `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}/wait?state=started&timeout=${Math.floor(timeoutMs / 1000)}`,
     { method: "GET" },
     cfg.token,
+    timeoutMs + 10_000,
   );
   await assertOk(res, "waitForMachineStarted");
 }

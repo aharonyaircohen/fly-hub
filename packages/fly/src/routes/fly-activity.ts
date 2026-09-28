@@ -28,6 +28,7 @@ import {
   snapshotFromServerProviderInventory,
 } from "../infrastructure/server-activity";
 import { listServerProviderInventory } from "../infrastructure/server-machines";
+import { managedMachineAppName, visibleManagedInventory } from "../machines/managed";
 
 export const runtime = "nodejs";
 
@@ -54,7 +55,10 @@ export async function GET(req: NextRequest) {
     // Record a fresh snapshot (throttled in the store), then compute from the
     // full timeline including it. A snapshot/read failure shouldn't blank the
     // view, so the record step is best-effort.
-    const inventory = await listServerProviderInventory(cfg);
+    const inventory = visibleManagedInventory(
+      await listServerProviderInventory(cfg),
+      managedMachineAppName(ctx.context.owner, ctx.context.repo, cfg.orgSlug),
+    );
     const now = Date.now();
     try {
       await recordServerProviderSnapshot(

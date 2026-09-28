@@ -26,7 +26,8 @@
     "./plugin/runners/*": "./src/plugin/runners/*.ts",
     "./plugin/terminal/*": "./src/plugin/terminal/*.ts",
     "./terminal/*": "./src/terminal/*.ts",
-    "./routes/*": "./src/routes/*.ts"
+    "./routes/*": "./src/routes/*.ts",
+    "./hub/*": "./src/hub/*.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

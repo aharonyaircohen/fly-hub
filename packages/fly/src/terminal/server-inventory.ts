@@ -28,6 +28,7 @@ import {
   type SavedBrainServiceForRequest,
 } from "../infrastructure/server-brain";
 import type { ServerProviderContext } from "../infrastructure/server-context";
+import { managedMachineAppName, visibleManagedInventory } from "../machines/managed";
 
 export interface TerminalInventoryRequestTarget {
   brainRequested?: boolean;
@@ -172,5 +173,13 @@ export async function loadTerminalInventoryAuthority(
     inventory = refreshServerProviderInventoryCounts(inventory);
   }
 
-  return { inventory, savedBrain };
+  return {
+    inventory: context
+      ? visibleManagedInventory(
+          inventory,
+          managedMachineAppName(context.owner, context.repo, cfg.orgSlug),
+        )
+      : inventory,
+    savedBrain,
+  };
 }

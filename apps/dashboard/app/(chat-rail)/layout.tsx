@@ -9,7 +9,10 @@
  *   legacy redirects that sit outside this group. Kept as an auth boundary so
  *   pages don't each re-wrap themselves.
  */
+"use client";
+
 import type { ReactNode } from "react";
+import { usePathname } from "next/navigation";
 import { AuthGuard } from "@dashboard/lib/auth-guard";
 
 export default function ChatRailGroupLayout({
@@ -17,5 +20,7 @@ export default function ChatRailGroupLayout({
 }: {
   children: ReactNode;
 }) {
+  const pathname = usePathname();
+  if (pathname.startsWith("/fly/")) return <>{children}</>;
   return <AuthGuard>{children}</AuthGuard>;
 }

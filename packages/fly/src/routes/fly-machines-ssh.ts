@@ -107,7 +107,14 @@ export async function downloadAuthorizedMachineSsh(input: {
     ) {
       return error("This machine's SSH port is already in use", 409);
     }
-    const archive = machineSshArchive({ app, machineId, access });
+    // Machines created before the SSH image fix stored the old root login
+    // name, but the browser-based image runs OpenSSH as the browser user.
+    const resolvedAccess =
+      access.username === "root" &&
+      machine.config?.image?.includes("/flyhub-browser")
+        ? { ...access, username: "browser" }
+        : access;
+    const archive = machineSshArchive({ app, machineId, access: resolvedAccess });
     return new NextResponse(new Uint8Array(archive.bytes), {
       headers: {
         "Content-Type": "application/zip",

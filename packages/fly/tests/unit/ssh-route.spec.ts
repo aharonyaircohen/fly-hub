@@ -130,6 +130,17 @@ describe("SSH credential download", () => {
     );
     expect([...new Uint8Array(await result.arrayBuffer())]).toEqual([1, 2, 3]);
   });
+  it("uses the browser login for an SSH image on an older Fly Hub machine", async () => {
+    mocks.machines.mockResolvedValue([{
+      id: "abc123",
+      config: { image: "ghcr.io/aharonyaircohen/flyhub-browser:latest" },
+    }]);
+    mocks.access.mockReturnValue({ port: 23001, username: "root" });
+    await POST(request());
+    expect(mocks.archive).toHaveBeenCalledWith(expect.objectContaining({
+      access: { port: 23001, username: "browser" },
+    }));
+  });
   it("does not expose provider or decryption errors", async () => {
     mocks.access.mockImplementation(() => {
       throw new Error("private-token secret");

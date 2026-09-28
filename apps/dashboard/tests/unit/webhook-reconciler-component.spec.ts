@@ -33,8 +33,8 @@ describe("webhook registration reconciler", () => {
     expect(clientSource).toMatch(/x-kody-webhook-reconcile/);
   });
 
-  it("is mounted once at the provider boundary", () => {
-    expect(providerSource).toMatch(/<WebhookRegistrationReconciler\s*\/>/);
+  it("is not mounted in Fly Hub", () => {
+    expect(providerSource).not.toMatch(/<WebhookRegistrationReconciler\s*\/>/);
   });
 
   it("does not reconcile on every render", () => {

@@ -13,6 +13,11 @@ const nextConfig = {
   async redirects() {
     return [
       {
+        source: "/",
+        destination: "/fly/machines",
+        permanent: false,
+      },
+      {
         source: "/cms/:path*",
         destination: "/content/entries/:path*",
         permanent: false,

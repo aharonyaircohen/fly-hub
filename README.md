@@ -1,11 +1,27 @@
-# fly-hub
+# Fly Hub
 
-This repository starts with the Fly runtime and Fly dashboard source copied unchanged from `aharonyaircohen/kody-chat` commit `01696f42b05e15f85eeb6a55432baeba581878a6`.
+Fly Hub is the Fly machine dashboard extracted from Kody Chat into this repository. It uses the original Fly runtime and machine management code, with a smaller dashboard for creating machines, downloading SSH settings, viewing live machines, and seeing recent machine events.
 
-The copied source includes `packages/fly`, the original `/fly/*` pages, their Fly and preview API routes, and their dashboard components. The app opens directly on Fly Config, with Fly navigation and the original repository switcher. The Kody Chat shell and unrelated page routes have been removed. Shared authentication, vault, backend, and component code remains where the Fly pages use it; that dependency set has not yet been reduced to Fly-only packages.
+Dashboard: [flyhub.thedigitalreality.app](https://flyhub.thedigitalreality.app)
 
-Extraction rule: preserve the original Fly pages and behavior. If a required dependency cannot be carried across without changing that behavior, stop and clarify the intended change before implementing a substitute.
+## Sign in
 
-## Local dashboard
+Enter a Fly API token. Fly Hub verifies it with Fly and remembers it in an encrypted, HttpOnly browser cookie for 30 days. Use **Disconnect** to remove it. The token stays on the server during machine requests. The connected Fly organization determines which machines are visible.
 
-Install with `pnpm install --frozen-lockfile`, configure `apps/dashboard/.env.local` from the original dashboard environment, and run `pnpm --filter kody-dashboard dev`. Open `http://localhost:3333/` and sign in with the existing account. Connect or choose a repository to use its Fly configuration. The copied Fly pages retain their original routes, components, and actions. No replacement Fly resource pages have been created here.
+## Machines
+
+Create an SSH machine with a name, size, region, and **Sleep when idle** choice. From Machines, download its SSH ZIP, suspend it, resume it, or destroy it. The dashboard also lists existing Kody-managed Fly machines available to the token.
+
+History shows recent events reported by Fly for machines that still exist. Events for deleted machines are not retained by this dashboard.
+
+## Local development
+
+Run `pnpm install --frozen-lockfile`, set `KODY_MASTER_KEY` in `apps/dashboard/.env.local`, then run `pnpm --filter kody-dashboard dev`. Open `http://localhost:3333/` and enter a Fly token. `KODY_MASTER_KEY` encrypts the remembered session and SSH settings. To develop the copied Kody features, additional environment variables may be needed.
+
+New SSH machines use the published `ghcr.io/aharonyaircohen/flyhub-browser:latest` image because it contains OpenSSH. `FLY_HUB_MACHINE_IMAGE` can override it only with an image that includes `/usr/sbin/sshd` and can run `/etc/kody-ssh/start.sh`. Set `FLY_HUB_MACHINE_SSH_USER` if that image uses another user.
+
+## Verification
+
+- `pnpm verify` checks types, lint, unit tests, and builds.
+- `PW_LOCAL=1 pnpm --filter kody-dashboard exec playwright test tests/e2e/fly-hub-shell.spec.ts tests/e2e/fly-hub-pages.spec.ts tests/e2e/fly-ssh-download.spec.ts --project=chromium --workers=1` tests the mounted local UI.
+- `packages/fly/tests/live/managed-machine-lifecycle.spec.ts` exercises the Fly lifecycle using disposable apps. See [lifecycle results](docs/lifecycle-test-results.md).

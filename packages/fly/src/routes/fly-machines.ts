@@ -12,8 +12,14 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 
-import { requireKodyAuth } from "@kody-ade/base/auth";
+import { requireKodyAuth, verifyActorLogin } from "@kody-ade/base/auth";
 import { logger } from "@kody-ade/base/logger";
+import { z } from "zod";
+import {
+  createManagedMachine,
+  managedMachineAppName,
+  visibleManagedInventory,
+} from "../machines/managed";
 import {
   emptyServerProviderInventory,
   listServerProviderInventoryCached,
@@ -48,7 +54,12 @@ export async function GET(req: NextRequest) {
   }
 
   if (inventory.machines.length > 0) {
-    return NextResponse.json(refreshServerProviderInventoryCounts(inventory));
+    return NextResponse.json(
+      visibleManagedInventory(
+        refreshServerProviderInventoryCounts(inventory),
+        managedMachineAppName(ctx.context.owner, ctx.context.repo, cfg!.orgSlug),
+      ),
+    );
   }
 
   if (!cfg) {
@@ -73,4 +84,49 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json(inventory);
+}
+
+const CreateBody = z.object({
+  name: z.string().trim().min(1).max(80),
+  size: z.enum(["low", "medium", "high"]),
+  region: z.string().regex(/^[a-z]{3,4}$/).optional(),
+  sleepWhenIdle: z.boolean(),
+  requestId: z.uuid(),
+});
+
+export async function POST(req: NextRequest) {
+  const authError = await requireKodyAuth(req);
+  if (authError) return authError;
+  const actor = await verifyActorLogin(req, undefined);
+  if ("status" in actor) return actor;
+  const body = CreateBody.safeParse(await req.json().catch(() => null));
+  if (!body.success) {
+    return NextResponse.json({ error: "invalid_machine_settings" }, { status: 400 });
+  }
+  const ctx = await resolveServerProviderContext(req);
+  if (!ctx.ok) {
+    return NextResponse.json({ error: ctx.error }, { status: ctx.status });
+  }
+  const cfg = serverProviderConfigFromContext(ctx.context);
+  if (!cfg) {
+    return NextResponse.json({ error: "fly_token_missing" }, { status: 503 });
+  }
+  try {
+    const machine = await createManagedMachine({
+      ...body.data,
+      owner: ctx.context.owner,
+      repo: ctx.context.repo,
+      cfg,
+    });
+    return NextResponse.json(machine, { status: 201 });
+  } catch (err) {
+    logger.error(
+      { err, owner: ctx.context.owner, repo: ctx.context.repo },
+      "fly-machines: create failed",
+    );
+    return NextResponse.json(
+      { error: "machine_creation_failed", message: "Could not create the machine. Check your Fly token, region, and available capacity." },
+      { status: 502 },
+    );
+  }
 }
