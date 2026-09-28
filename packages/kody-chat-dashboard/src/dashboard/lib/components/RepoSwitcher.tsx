@@ -137,7 +137,7 @@ export function RepoSwitcher({
   // straight onto the connect form. Hiding it left first-run users with
   // a static title and no obvious way to add a repository.
   const current = auth ? auth.repos[auth.currentRepoIndex] : undefined;
-  const title = current ? current.repo : "Kody Operations";
+  const title = current ? current.repo : "Fly Hub";
   const repoGroups = auth ? groupReposByOwner(auth.repos) : [];
 
   const rail = variant === "rail";

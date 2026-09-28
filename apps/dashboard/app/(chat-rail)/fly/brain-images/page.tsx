@@ -13,7 +13,7 @@ export const revalidate = false;
 export const fetchCache = "force-cache";
 
 export const metadata = buildKodyMetadata({
-  title: "Brain Images — Kody Operations Dashboard",
+  title: "Brain Images",
   description: "Manage saved Brain runtime images.",
   path: "/fly/brain-images",
 });

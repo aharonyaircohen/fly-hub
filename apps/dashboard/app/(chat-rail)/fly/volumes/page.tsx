@@ -12,7 +12,7 @@ export const revalidate = false;
 export const fetchCache = "force-cache";
 
 export const metadata = buildKodyMetadata({
-  title: "Fly Volumes — Kody Operations Dashboard",
+  title: "Fly Volumes",
   description: "View and manage persistent Fly volumes.",
   path: "/fly/volumes",
 });

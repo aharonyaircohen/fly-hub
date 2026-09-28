@@ -13,7 +13,7 @@ export const revalidate = false;
 export const fetchCache = "force-cache";
 
 export const metadata = buildKodyMetadata({
-  title: "Fly Machine — Kody Operations Dashboard",
+  title: "Fly Machine",
   description: "View and manage a live Fly machine.",
   path: "/fly/machines",
 });

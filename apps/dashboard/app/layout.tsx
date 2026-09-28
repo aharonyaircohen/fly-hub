@@ -12,7 +12,7 @@ import { GeistSans } from "geist/font/sans";
 import { Assistant } from "next/font/google";
 
 import { KodyProviders } from "./KodyProviders";
-import { ChatRailShell } from "@dashboard/lib/components/ChatRailShell";
+import { FlyShell } from "./FlyShell";
 import { Toaster } from "@kody-ade/base/ui/toaster";
 import {
   defaultTheme,
@@ -33,8 +33,8 @@ export const metadata: Metadata = {
     process.env.NEXT_PUBLIC_SERVER_URL?.trim() || "http://localhost:3333",
   ),
   title: {
-    default: "Kody Operations Dashboard",
-    template: "%s | Kody Operations",
+    default: "Fly Hub",
+    template: "%s | Fly Hub",
   },
   // PWA: lets iOS Safari treat the site as installable. Combined with
   // `apple-touch-icon` below, "Add to Home Screen" produces a real PWA icon
@@ -42,7 +42,7 @@ export const metadata: Metadata = {
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
-    title: "Kody",
+    title: "Fly Hub",
     statusBarStyle: "black-translucent",
   },
   icons: {
@@ -94,7 +94,7 @@ export default async function KodyLayout({
       </head>
       <body>
         <KodyProviders initialAuthToken={initialAuthToken}>
-          <ChatRailShell>{children}</ChatRailShell>
+          <FlyShell>{children}</FlyShell>
           <Toaster />
         </KodyProviders>
       </body>

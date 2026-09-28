@@ -12,7 +12,7 @@ export const revalidate = false;
 export const fetchCache = "force-cache";
 
 export const metadata = buildKodyMetadata({
-  title: "Fly History — Kody Operations Dashboard",
+  title: "Fly History",
   description: "Review Fly machine activity snapshots and estimated cost.",
   path: "/fly/history",
 });

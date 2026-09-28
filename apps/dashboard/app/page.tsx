@@ -8,26 +8,13 @@
  *   away in the rail's "Views" group. Force static for OG tags — social
  *   crawlers need metadata without auth; AuthGuard gates the live content.
  */
-import { AuthGuard } from "@dashboard/lib/auth-guard";
-import { KodyHome } from "@dashboard/lib/components/KodyHome";
-import { buildKodyMetadata } from "./metadata";
+import { redirect } from "next/navigation";
 
 // Force static generation so OG tags are available without authentication
 export const dynamic = "force-static";
 export const revalidate = false;
 export const fetchCache = "force-cache";
 
-export const metadata = buildKodyMetadata({
-  title: "Happening now",
-  description:
-    "Monitor and manage AI coding agent tasks, pipelines, and deployments",
-  path: "/",
-});
-
-export default function KodyPage() {
-  return (
-    <AuthGuard>
-      <KodyHome />
-    </AuthGuard>
-  );
+export default function FlyHubPage() {
+  redirect("/fly/config");
 }

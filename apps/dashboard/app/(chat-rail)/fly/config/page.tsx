@@ -13,7 +13,7 @@ export const revalidate = false;
 export const fetchCache = "force-cache";
 
 export const metadata = buildKodyMetadata({
-  title: "Fly Config — Kody Operations Dashboard",
+  title: "Fly Config",
   description: "Configure Fly task runners and Brain-on-Fly.",
   path: "/fly/config",
 });

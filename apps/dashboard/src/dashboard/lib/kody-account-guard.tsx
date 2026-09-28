@@ -23,7 +23,7 @@ function KodySignIn() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider,
-          callbackURL: new URL("/chat", window.location.origin).toString(),
+          callbackURL: new URL("/fly/config", window.location.origin).toString(),
         }),
       });
       const result = (await response.json().catch(() => null)) as {
@@ -51,7 +51,7 @@ function KodySignIn() {
       const result = await kodyAuthClient.signIn.email({
         email,
         password,
-        callbackURL: "/chat",
+        callbackURL: "/fly/config",
       });
       if (result.error)
         setError("Email login failed. Check the email and password.");
@@ -65,10 +65,9 @@ function KodySignIn() {
   return (
     <main className="flex min-h-screen items-center justify-center px-6">
       <section className="w-full max-w-md rounded-xl border bg-card p-8 shadow-sm">
-        <h1 className="text-2xl font-semibold">Sign in to Kody</h1>
+        <h1 className="text-2xl font-semibold">Sign in to Fly Hub</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Start chatting now. Connect a repository only when you need repository
-          features.
+          Sign in to manage your Fly runtime.
         </p>
         <div className="mt-6 grid gap-3">
           <Button

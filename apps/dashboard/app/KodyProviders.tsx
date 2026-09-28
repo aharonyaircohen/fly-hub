@@ -10,12 +10,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 import { ThemeProvider } from "@dashboard/providers/Theme";
 import { AuthProvider } from "@dashboard/lib/auth-context";
-import { ServiceWorkerRegister } from "@dashboard/lib/push/ServiceWorkerRegister";
-import { InboxWatcher } from "@dashboard/lib/inbox/useInboxWatcher";
-import { PageViewTracker } from "@dashboard/lib/events/PageViewTracker";
 import { ConvexClientProvider } from "@dashboard/lib/convex/ConvexClientProvider";
-import { WebhookRegistrationReconciler } from "@dashboard/lib/webhooks/WebhookRegistrationReconciler";
 import { InternalLinkNavigation } from "@dashboard/lib/components/InternalLinkNavigation";
+import { kodyAuthClient } from "@dashboard/lib/auth/kody-auth-client";
+import { WebhookRegistrationReconciler } from "@dashboard/lib/webhooks/WebhookRegistrationReconciler";
 
 function makeQueryClient() {
   return new QueryClient({
@@ -52,16 +50,21 @@ export function KodyProviders({
     <QueryClientProvider client={queryClient}>
       <ConvexClientProvider initialToken={initialAuthToken}>
         <ThemeProvider>
-          <AuthProvider persistence="account">
-            <WebhookRegistrationReconciler />
-            <InternalLinkNavigation />
-            <ServiceWorkerRegister />
-            <InboxWatcher />
-            <PageViewTracker />
-            {children}
-          </AuthProvider>
+          <FlyAccountProviders>{children}</FlyAccountProviders>
         </ThemeProvider>
       </ConvexClientProvider>
     </QueryClientProvider>
+  );
+}
+
+function FlyAccountProviders({ children }: { children: React.ReactNode }) {
+  const { data: session } = kodyAuthClient.useSession();
+  if (!session) return <>{children}</>;
+  return (
+    <AuthProvider persistence="account">
+      <WebhookRegistrationReconciler />
+      <InternalLinkNavigation />
+      {children}
+    </AuthProvider>
   );
 }

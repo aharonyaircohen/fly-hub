@@ -67,8 +67,7 @@ export function RepoManager() {
     >
       <div className="space-y-6">
         <p className="text-sm text-white/60">
-          Add repository context when you need repository pages, tools, and
-          agency. Your private Chat and its history stay the same.
+          Connect the repository whose Fly runtime you want to manage.
         </p>
 
         {pendingImport ? (

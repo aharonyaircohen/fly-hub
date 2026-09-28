@@ -8,7 +8,7 @@ import type { Metadata } from "next";
 import { fetchIssue } from "@dashboard/lib/github-client";
 import { GITHUB_OWNER, GITHUB_REPO } from "@kody-ade/base/constants";
 
-const SITE_NAME = "Kody Operations Dashboard";
+const SITE_NAME = "Fly Hub";
 const BASE_URL =
   process.env.NEXT_PUBLIC_SERVER_URL?.trim() || "http://localhost:3333";
 const DEFAULT_IMAGE = `${BASE_URL}/website-template-OG.webp`;
