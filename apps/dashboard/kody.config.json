@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/aharonyaircohen/Kody-Engine-Lite/main/kody.config.schema.json",
+  "quality": {
+    "typecheck": "pnpm typecheck",
+    "lint": "pnpm lint",
+    "format": "pnpm format:check",
+    "testUnit": "pnpm test"
+  },
+  "git": {
+    "defaultBranch": "main"
+  },
+  "github": {
+    "owner": "aharonyaircohen",
+    "repo": "kody-chat"
+  },
+  "agent": {
+    "model": "minimax/MiniMax-M3"
+  },
+  "company": {
+    "activeAgents": ["ceo"],
+    "activeCapabilities": [
+      "capability-call",
+      "cms-content-editor",
+      "dev-ci-health",
+      "task-verifier",
+      "assigned-task-runner",
+      "health-check",
+      "task-leader",
+      "review",
+      "ui-review",
+      "fix",
+      "merge"
+    ],
+    "activeExecutables": ["agent-ask"]
+  },
+  "access": {
+    "allowedAssociations": [
+      "OWNER",
+      "COLLABORATOR",
+      "CONTRIBUTOR",
+      "FIRST_TIME_CONTRIBUTOR",
+      "MEMBER"
+    ]
+  },
+  "defaultExecutable": "classify",
+  "defaultPrExecutable": "fix"
+}

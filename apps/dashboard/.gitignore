@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+
+# Build
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+.history/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Vercel
+.vercel
+
+# Kody action state (local scratch only; durable state is in Convex)
+.kody-action-store/
+
+# Kody sandboxes — local agent working copies (do not commit)
+.kody/sandboxes/
+
+# Claude worktrees — local agent working copies (do not commit)
+.claude/worktrees/
+
+# Test results
+test-results/
+
+# Coverage
+coverage/
+_tmp-drive.mjs
+
+# Kody runtime scratch; durable runtime state and model definitions live in Convex.
+.kody/

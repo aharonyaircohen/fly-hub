@@ -1,0 +1,39 @@
+{
+  "name": "@kody-ade/cms",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@kody-ade/base": "workspace:*",
+    "@octokit/rest": "^22.0.1",
+    "ai": "^6.0.97",
+    "mongodb": "^7.3.0",
+    "zod": "^4.3.5"
+  },
+  "license": "MIT",
+  "description": "Kody CMS layer — collection config, storage adapters (backend + MongoDB), service, MCP surface, API route handlers, chat tools. Depends only on @kody-ade/base; consumed as TS source by both hosts.",
+  "exports": {
+    "./adapters": "./src/adapters/index.ts",
+    "./adapters/*": "./src/adapters/*.ts",
+    "./model/*": "./src/model/*.ts",
+    "./schema/*": "./src/schema/*.ts",
+    "./routes/*": "./src/routes/*.ts",
+    "./tools/*": "./src/tools/*.ts",
+    "./github": "./src/github.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "next": "16.2.9",
+    "typescript": "5.9.3",
+    "vitest": "^4.0.16"
+  },
+  "peerDependencies": {
+    "next": "16.2.9",
+    "react": "19.2.7"
+  }
+}

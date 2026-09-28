@@ -1,0 +1,967 @@
+import { NextRequest, NextResponse } from "next/server";
+
+import {
+  getRequestAuth,
+  getUserOctokit,
+  requireKodyAuth,
+} from "@kody-ade/base/auth";
+import { clearGitHubContext, setGitHubContext } from "../github";
+import { logger } from "@kody-ade/base/logger";
+import {
+  assertSchemaOperationAllowed,
+  CmsConfigError,
+  DEFAULT_CMS_PERMISSIONS,
+  invalidateCmsConfigCache,
+  loadCmsConfigFromState,
+  normalizeCmsCollectionSlug,
+} from "../config";
+import {
+  defaultCmsAdapterSettings,
+  isValidCmsAdapterName,
+} from "../adapter-catalog";
+import { CmsRuntimeError, listCmsCollections } from "../service";
+import {
+  readRepoDocFile,
+  writeRepoDocFiles,
+  writeRepoDocFile,
+} from "../repo-docs";
+import { getCmsActorRole } from "../roles";
+import type {
+  CmsAdapterSettings,
+  CmsCollectionOperations,
+  CmsContentOperation,
+  CmsPermissionsConfig,
+  CmsRole,
+} from "../types";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+const NO_STORE_HEADERS = { "Cache-Control": "no-store, max-age=0" };
+
+export async function GET(req: NextRequest) {
+  const authResult = await requireKodyAuth(req);
+  if (authResult instanceof NextResponse) return authResult;
+
+  const headerAuth = getRequestAuth(req);
+  if (!headerAuth) {
+    return NextResponse.json({ error: "no_repo_context" }, { status: 400 });
+  }
+
+  setGitHubContext(
+    headerAuth.owner,
+    headerAuth.repo,
+    headerAuth.token,
+    headerAuth.storeRepoUrl,
+    headerAuth.storeRef,
+  );
+
+  try {
+    const octokit = await getUserOctokit(req);
+    if (!octokit) {
+      return NextResponse.json({ error: "no_user_token" }, { status: 401 });
+    }
+
+    const actorRole = await getCmsActorRole(
+      req,
+      octokit,
+      headerAuth.owner,
+      headerAuth.repo,
+    );
+    const cms = await listCmsCollections(
+      octokit,
+      headerAuth.owner,
+      headerAuth.repo,
+      actorRole,
+    );
+    return NextResponse.json({ cms }, { headers: NO_STORE_HEADERS });
+  } catch (error) {
+    return handleCmsError(error, "failed_to_load_cms");
+  } finally {
+    clearGitHubContext();
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const authResult = await requireKodyAuth(req);
+  if (authResult instanceof NextResponse) return authResult;
+
+  const headerAuth = getRequestAuth(req);
+  if (!headerAuth) {
+    return NextResponse.json({ error: "no_repo_context" }, { status: 400 });
+  }
+
+  setGitHubContext(
+    headerAuth.owner,
+    headerAuth.repo,
+    headerAuth.token,
+    headerAuth.storeRepoUrl,
+    headerAuth.storeRef,
+  );
+
+  try {
+    const octokit = await getUserOctokit(req);
+    if (!octokit) {
+      return NextResponse.json({ error: "no_user_token" }, { status: 401 });
+    }
+
+    const payload = await req.json().catch(() => ({}));
+    const name = readCmsName(payload, headerAuth.repo);
+    const adapter = readCmsAdapter(payload);
+    const existing = await readRepoDocFile(
+      octokit,
+      headerAuth.owner,
+      headerAuth.repo,
+      "cms/config.json",
+    );
+    if (existing) {
+      return NextResponse.json(
+        {
+          error: "cms_already_configured",
+          message: "CMS is already configured for this repo.",
+        },
+        { status: 409, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    const actorRole = await getCmsActorRole(
+      req,
+      octokit,
+      headerAuth.owner,
+      headerAuth.repo,
+    );
+    const cms = {
+      configured: true as const,
+      version: 1 as const,
+      name,
+      environment: "default",
+      defaultAdapter: adapter,
+      writePolicy: "read-only" as const,
+      actorRole,
+      permissions: DEFAULT_CMS_PERMISSIONS,
+      collections: [],
+    };
+
+    await writeRepoDocFile({
+      octokit,
+      owner: headerAuth.owner,
+      repo: headerAuth.repo,
+      path: "cms/config.json",
+      content: `${JSON.stringify(
+        {
+          version: 1,
+          name,
+          environment: "default",
+          defaultAdapter: adapter,
+          adapters: {
+            [adapter]: defaultCmsAdapterSettings(adapter),
+          },
+          writePolicy: "read-only",
+          collections: [],
+        },
+        null,
+        2,
+      )}\n`,
+      message: "chore(cms): create CMS config",
+    });
+    invalidateCmsConfigCache(headerAuth.owner, headerAuth.repo);
+
+    return NextResponse.json(
+      { cms },
+      { status: 201, headers: NO_STORE_HEADERS },
+    );
+  } catch (error) {
+    return handleCmsError(error, "failed_to_create_cms");
+  } finally {
+    clearGitHubContext();
+  }
+}
+
+export async function PATCH(req: NextRequest) {
+  const authResult = await requireKodyAuth(req);
+  if (authResult instanceof NextResponse) return authResult;
+
+  const headerAuth = getRequestAuth(req);
+  if (!headerAuth) {
+    return NextResponse.json({ error: "no_repo_context" }, { status: 400 });
+  }
+
+  setGitHubContext(
+    headerAuth.owner,
+    headerAuth.repo,
+    headerAuth.token,
+    headerAuth.storeRepoUrl,
+    headerAuth.storeRef,
+  );
+
+  try {
+    const octokit = await getUserOctokit(req);
+    if (!octokit) {
+      return NextResponse.json({ error: "no_user_token" }, { status: 401 });
+    }
+
+    const config = await loadCmsConfigFromState(
+      octokit,
+      headerAuth.owner,
+      headerAuth.repo,
+    );
+    if (!config) {
+      throw new CmsConfigError(["CMS is not configured for this repo"], {
+        code: "cms_not_configured",
+        status: 404,
+      });
+    }
+
+    const actorRole = await getCmsActorRole(
+      req,
+      octokit,
+      headerAuth.owner,
+      headerAuth.repo,
+    );
+    assertSchemaOperationAllowed(config, "edit", actorRole);
+
+    const rawPayload = await req.json().catch(() => ({}));
+    const adapter = isCmsAdapterPatch(rawPayload)
+      ? readRequiredCmsAdapter(rawPayload)
+      : null;
+    const adapterSettings = adapter
+      ? readCmsAdapterSettings(rawPayload)
+      : undefined;
+    const connectionName = adapter
+      ? readCmsConnectionName(rawPayload, adapter)
+      : null;
+    const permissionsPatch = adapter
+      ? null
+      : sanitizePermissionsPayload(rawPayload);
+    if (permissionsPatch?.connectionName) {
+      for (const collection of permissionsPatch.collections) {
+        const configured =
+          config.collections[normalizeCmsCollectionSlug(collection.name)];
+        if (
+          !configured ||
+          configured.adapter !== permissionsPatch.connectionName
+        ) {
+          throw new CmsRuntimeError(
+            "cms_connection_scope_invalid",
+            `${collection.name} does not belong to ${permissionsPatch.connectionName}.`,
+            400,
+          );
+        }
+      }
+    }
+    const files = adapter
+      ? await buildCmsAdapterFiles(
+          octokit,
+          headerAuth.owner,
+          headerAuth.repo,
+          config.defaultAdapter,
+          adapter,
+          adapterSettings,
+          connectionName ?? adapter,
+        )
+      : await buildCmsPermissionFiles(
+          octokit,
+          headerAuth.owner,
+          headerAuth.repo,
+          permissionsPatch!,
+        );
+
+    if (files.length > 0) {
+      await writeRepoDocFiles({
+        octokit,
+        owner: headerAuth.owner,
+        repo: headerAuth.repo,
+        files,
+        message: adapter
+          ? "chore(cms): update CMS adapter"
+          : "chore(cms): update CMS permissions",
+      });
+      invalidateCmsConfigCache(headerAuth.owner, headerAuth.repo);
+    }
+    const cms = await listCmsCollections(
+      octokit,
+      headerAuth.owner,
+      headerAuth.repo,
+      actorRole,
+    );
+    return NextResponse.json({ cms }, { headers: NO_STORE_HEADERS });
+  } catch (error) {
+    return handleCmsError(error, "failed_to_update_cms_permissions");
+  } finally {
+    clearGitHubContext();
+  }
+}
+
+function readCmsName(payload: unknown, repo: string): string {
+  const fallback = `${repo} CMS`;
+  if (!payload || typeof payload !== "object" || !("name" in payload)) {
+    return fallback;
+  }
+  const name = String((payload as { name?: unknown }).name ?? "").trim();
+  if (!name) return fallback;
+  if (name.length > 120) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "name must be 120 characters or fewer",
+      400,
+    );
+  }
+  return name;
+}
+
+function readCmsAdapter(payload: unknown): string {
+  const fallback = "mongodb";
+  if (!payload || typeof payload !== "object" || !("adapter" in payload)) {
+    return fallback;
+  }
+  const adapter = String((payload as { adapter?: unknown }).adapter ?? "")
+    .trim()
+    .toLowerCase();
+  if (!adapter) return fallback;
+  if (!isValidCmsAdapterName(adapter)) {
+    throw new CmsRuntimeError("invalid_body", "adapter name is invalid", 400);
+  }
+  return adapter;
+}
+
+function readRequiredCmsAdapter(payload: unknown): string {
+  if (!payload || typeof payload !== "object" || !("adapter" in payload)) {
+    throw new CmsRuntimeError("invalid_body", "adapter is required", 400);
+  }
+  const adapter = String((payload as { adapter?: unknown }).adapter ?? "")
+    .trim()
+    .toLowerCase();
+  if (!adapter) {
+    throw new CmsRuntimeError("invalid_body", "adapter is required", 400);
+  }
+  if (!isValidCmsAdapterName(adapter)) {
+    throw new CmsRuntimeError("invalid_body", "adapter name is invalid", 400);
+  }
+  return adapter;
+}
+
+function isCmsAdapterPatch(payload: unknown): boolean {
+  return Boolean(
+    payload && typeof payload === "object" && "adapter" in payload,
+  );
+}
+
+function readCmsAdapterSettings(
+  payload: unknown,
+): CmsAdapterSettings | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  if (!("adapterSettings" in payload)) return undefined;
+  const settings = (payload as { adapterSettings?: unknown }).adapterSettings;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "adapterSettings must be an object",
+      400,
+    );
+  }
+  return { ...(settings as CmsAdapterSettings) };
+}
+
+function readCmsConnectionName(payload: unknown, fallback: string): string {
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    !("connectionName" in payload)
+  ) {
+    return fallback;
+  }
+  const name = String(
+    (payload as { connectionName?: unknown }).connectionName ?? "",
+  )
+    .trim()
+    .toLowerCase();
+  if (!name || !isValidCmsAdapterName(name)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "connection name is invalid",
+      400,
+    );
+  }
+  return name;
+}
+
+const CMS_ROLES = new Set<CmsRole>(["viewer", "editor", "admin"]);
+const CONTENT_PERMISSION_OPERATIONS: CmsContentOperation[] = [
+  "list",
+  "get",
+  "search",
+  "create",
+  "update",
+  "delete",
+];
+const CMS_WRITE_OPERATIONS = ["create", "update", "delete"] as const;
+type CmsWriteOperation = (typeof CMS_WRITE_OPERATIONS)[number];
+type CmsWriteOperationsPatch = Pick<CmsCollectionOperations, CmsWriteOperation>;
+
+interface CmsPermissionsPatch {
+  connectionName?: string;
+  permissions?: CmsPermissionsConfig;
+  collections: Array<{
+    name: string;
+    permissions: CmsPermissionsConfig;
+    operations?: CmsWriteOperationsPatch;
+  }>;
+}
+
+function sanitizePermissionsPayload(input: unknown): CmsPermissionsPatch {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "request body must be an object",
+      400,
+    );
+  }
+
+  const body = input as Record<string, unknown>;
+  return {
+    connectionName: readOptionalConnectionName(body.connectionName),
+    permissions: sanitizePermissions(body.permissions),
+    collections: Array.isArray(body.collections)
+      ? body.collections.map(sanitizeCollectionPermissionPatch)
+      : [],
+  };
+}
+
+function readOptionalConnectionName(input: unknown): string | undefined {
+  if (input == null) return undefined;
+  const name = String(input).trim().toLowerCase();
+  if (!name || !isValidCmsAdapterName(name)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "connection name is invalid",
+      400,
+    );
+  }
+  return name;
+}
+
+function sanitizeCollectionPermissionPatch(input: unknown): {
+  name: string;
+  permissions: CmsPermissionsConfig;
+  operations?: CmsWriteOperationsPatch;
+} {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "collection permission must be an object",
+      400,
+    );
+  }
+
+  const item = input as Record<string, unknown>;
+  const name = String(item.name ?? "").trim();
+  if (!name || !/^[A-Za-z0-9_.-]+$/.test(name)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "collection name is invalid",
+      400,
+    );
+  }
+
+  return {
+    name,
+    permissions: sanitizePermissions(item.permissions) ?? {},
+    operations: sanitizeWriteOperations(item.operations),
+  };
+}
+
+function sanitizePermissions(input: unknown): CmsPermissionsConfig | undefined {
+  if (input == null) return undefined;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "permissions must be an object",
+      400,
+    );
+  }
+
+  const value = input as Record<string, unknown>;
+  return {
+    content: sanitizeRoleMap(value.content, CONTENT_PERMISSION_OPERATIONS),
+    schema: sanitizeRoleMap(value.schema, ["generate", "refresh", "edit"]),
+  };
+}
+
+function sanitizeRoleMap<T extends string>(
+  input: unknown,
+  operations: readonly T[],
+): Partial<Record<T, CmsRole[]>> | undefined {
+  if (input == null) return undefined;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "permission role map must be an object",
+      400,
+    );
+  }
+
+  const raw = input as Record<string, unknown>;
+  const result: Partial<Record<T, CmsRole[]>> = {};
+
+  for (const operation of operations) {
+    if (!(operation in raw)) continue;
+    result[operation] = sanitizeRoles(raw[operation]);
+  }
+
+  return result;
+}
+
+function sanitizeRoles(input: unknown): CmsRole[] {
+  if (!Array.isArray(input)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "permission roles must be an array",
+      400,
+    );
+  }
+
+  const roles: CmsRole[] = [];
+  for (const role of input) {
+    if (!CMS_ROLES.has(role as CmsRole)) {
+      throw new CmsRuntimeError(
+        "invalid_body",
+        `invalid CMS role: ${String(role)}`,
+        400,
+      );
+    }
+    if (!roles.includes(role as CmsRole)) roles.push(role as CmsRole);
+  }
+
+  if (!roles.includes("admin")) roles.push("admin");
+  return roles;
+}
+
+function sanitizeWriteOperations(
+  input: unknown,
+): CmsWriteOperationsPatch | undefined {
+  if (input == null) return undefined;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new CmsRuntimeError(
+      "invalid_body",
+      "collection operations must be an object",
+      400,
+    );
+  }
+
+  const raw = input as Record<string, unknown>;
+  const result = {} as CmsWriteOperationsPatch;
+  for (const operation of CMS_WRITE_OPERATIONS) {
+    if (!(operation in raw)) continue;
+    if (typeof raw[operation] !== "boolean") {
+      throw new CmsRuntimeError(
+        "invalid_body",
+        `collection operation ${operation} must be boolean`,
+        400,
+      );
+    }
+    result[operation] = raw[operation];
+  }
+  return result;
+}
+
+async function buildCmsPermissionFiles(
+  octokit: Awaited<ReturnType<typeof getUserOctokit>>,
+  owner: string,
+  repo: string,
+  patch: CmsPermissionsPatch,
+) {
+  if (!octokit)
+    throw new CmsRuntimeError("no_user_token", "No user token", 401);
+
+  const configFile = await readRepoDocFile(
+    octokit,
+    owner,
+    repo,
+    "cms/config.json",
+  );
+  if (!configFile) {
+    throw new CmsConfigError(["missing state file: cms/config.json"], {
+      code: "cms_not_configured",
+      status: 404,
+    });
+  }
+
+  const root = parseJsonRecord(configFile.content, "cms/config.json");
+  const rootBefore = JSON.stringify(root);
+  if (patch.permissions !== undefined) {
+    applyPermissionsPatch(root, patch.permissions);
+  }
+
+  const collectionPatchByName = buildCollectionPatchMap(patch.collections);
+  const files: Array<{ path: string; content: string }> = [];
+  let rootChanged = JSON.stringify(root) !== rootBefore;
+
+  if (collectionPatchByName.size === 0) {
+    if (rootChanged) files.push(buildStateFile("cms/config.json", root));
+    return files;
+  }
+
+  const rawCollections = root.collections;
+  if (Array.isArray(rawCollections)) {
+    for (let index = 0; index < rawCollections.length; index += 1) {
+      const entry = rawCollections[index];
+      if (typeof entry === "string") {
+        const path = `cms/${entry}`;
+        const file = await readRepoDocFile(octokit, owner, repo, path);
+        if (!file) continue;
+        const collection = parseJsonRecord(file.content, path);
+        const name = String(collection.name ?? "");
+        const collectionPatch = findCollectionPatch(
+          collectionPatchByName,
+          name,
+        );
+        if (!collectionPatch) continue;
+        if (applyCollectionPatch(collection, collectionPatch)) {
+          files.push(buildStateFile(path, collection));
+        }
+        continue;
+      }
+
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const collection = entry as Record<string, unknown>;
+        const name = String(collection.name ?? "");
+        const collectionPatch = findCollectionPatch(
+          collectionPatchByName,
+          name,
+        );
+        if (
+          collectionPatch &&
+          applyCollectionPatch(collection, collectionPatch)
+        ) {
+          rootChanged = true;
+        }
+      }
+    }
+    if (rootChanged) files.unshift(buildStateFile("cms/config.json", root));
+    return files;
+  }
+
+  if (rawCollections && typeof rawCollections === "object") {
+    for (const [name, value] of Object.entries(rawCollections)) {
+      const collectionName =
+        value && typeof value === "object" && !Array.isArray(value)
+          ? String((value as Record<string, unknown>).name ?? name)
+          : name;
+      const collectionPatch = findCollectionPatch(
+        collectionPatchByName,
+        collectionName,
+      );
+      if (
+        collectionPatch &&
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+      ) {
+        if (
+          applyCollectionPatch(
+            value as Record<string, unknown>,
+            collectionPatch,
+          )
+        ) {
+          rootChanged = true;
+        }
+      }
+    }
+  }
+
+  if (rootChanged) files.unshift(buildStateFile("cms/config.json", root));
+  return files;
+}
+
+function buildCollectionPatchMap(patches: CmsPermissionsPatch["collections"]) {
+  const result = new Map<string, CmsPermissionsPatch["collections"][number]>();
+  for (const patch of patches) {
+    result.set(patch.name, patch);
+    result.set(normalizeCmsCollectionSlug(patch.name), patch);
+  }
+  return result;
+}
+
+function findCollectionPatch(
+  patches: Map<string, CmsPermissionsPatch["collections"][number]>,
+  name: string,
+) {
+  return patches.get(name) ?? patches.get(normalizeCmsCollectionSlug(name));
+}
+
+async function buildCmsAdapterFiles(
+  octokit: Awaited<ReturnType<typeof getUserOctokit>>,
+  owner: string,
+  repo: string,
+  previousDefaultAdapter: string | undefined,
+  adapter: string,
+  adapterSettings: CmsAdapterSettings | undefined = undefined,
+  connectionName: string = adapter,
+) {
+  if (!octokit)
+    throw new CmsRuntimeError("no_user_token", "No user token", 401);
+
+  const configFile = await readRepoDocFile(
+    octokit,
+    owner,
+    repo,
+    "cms/config.json",
+  );
+  if (!configFile) {
+    throw new CmsConfigError(["missing state file: cms/config.json"], {
+      code: "cms_not_configured",
+      status: 404,
+    });
+  }
+
+  const root = parseJsonRecord(configFile.content, "cms/config.json");
+  const oldDefault =
+    typeof root.defaultAdapter === "string" && root.defaultAdapter.trim()
+      ? root.defaultAdapter.trim()
+      : previousDefaultAdapter;
+  if (!oldDefault) root.defaultAdapter = connectionName;
+
+  const adapters =
+    root.adapters &&
+    typeof root.adapters === "object" &&
+    !Array.isArray(root.adapters)
+      ? { ...(root.adapters as Record<string, unknown>) }
+      : {};
+  const existingAdapterSettings =
+    adapters[connectionName] &&
+    typeof adapters[connectionName] === "object" &&
+    !Array.isArray(adapters[connectionName])
+      ? (adapters[connectionName] as Record<string, unknown>)
+      : {};
+  adapters[connectionName] = normalizeCmsAdapterSettings(adapter, {
+    ...defaultCmsAdapterSettings(adapter),
+    ...existingAdapterSettings,
+    ...(adapterSettings ?? {}),
+    adapter,
+  });
+  root.adapters = adapters;
+
+  const files = [
+    { path: "cms/config.json", content: `${JSON.stringify(root, null, 2)}\n` },
+  ];
+
+  if (connectionName === adapter) {
+    root.defaultAdapter = adapter;
+    await applyAdapterToDefaultCollections(
+      octokit,
+      owner,
+      repo,
+      root,
+      oldDefault,
+      adapter,
+      files,
+    );
+  }
+  files[0] = {
+    path: "cms/config.json",
+    content: `${JSON.stringify(root, null, 2)}\n`,
+  };
+  return files;
+}
+
+function normalizeCmsAdapterSettings(
+  adapter: string,
+  settings: CmsAdapterSettings,
+): CmsAdapterSettings {
+  if (adapter === "file") {
+    const rootDir = stringSetting(settings.rootDir).trim() || "cms/content";
+    return { ...settings, rootDir };
+  }
+  if (adapter === "mongodb") {
+    const databaseUriSecret =
+      stringSetting(settings.databaseUriSecret).trim() || "DATABASE_URL";
+    return { ...settings, databaseUriSecret };
+  }
+  return settings;
+}
+
+function stringSetting(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+async function applyAdapterToDefaultCollections(
+  octokit: Awaited<ReturnType<typeof getUserOctokit>>,
+  owner: string,
+  repo: string,
+  root: Record<string, unknown>,
+  oldDefault: string | undefined,
+  adapter: string,
+  files: Array<{ path: string; content: string }>,
+) {
+  if (!octokit) return;
+  const rawCollections = root.collections;
+
+  if (Array.isArray(rawCollections)) {
+    for (let index = 0; index < rawCollections.length; index += 1) {
+      const entry = rawCollections[index];
+      if (typeof entry === "string") {
+        const path = `cms/${entry}`;
+        const file = await readRepoDocFile(octokit, owner, repo, path);
+        if (!file) continue;
+        const collection = parseJsonRecord(file.content, path);
+        if (!shouldSwitchCollectionAdapter(collection, oldDefault)) continue;
+        collection.adapter = adapter;
+        files.push({
+          path,
+          content: `${JSON.stringify(collection, null, 2)}\n`,
+        });
+        continue;
+      }
+
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const collection = entry as Record<string, unknown>;
+        if (shouldSwitchCollectionAdapter(collection, oldDefault)) {
+          collection.adapter = adapter;
+        }
+      }
+    }
+    return;
+  }
+
+  if (rawCollections && typeof rawCollections === "object") {
+    for (const value of Object.values(rawCollections)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const collection = value as Record<string, unknown>;
+        if (shouldSwitchCollectionAdapter(collection, oldDefault)) {
+          collection.adapter = adapter;
+        }
+      }
+    }
+  }
+}
+
+function shouldSwitchCollectionAdapter(
+  collection: Record<string, unknown>,
+  oldDefault: string | undefined,
+): boolean {
+  const current =
+    typeof collection.adapter === "string" ? collection.adapter.trim() : "";
+  return !current || Boolean(oldDefault && current === oldDefault);
+}
+
+function applyCollectionPatch(
+  collection: Record<string, unknown>,
+  patch: CmsPermissionsPatch["collections"][number],
+): boolean {
+  const before = JSON.stringify(collection);
+  applyPermissionsPatch(collection, patch.permissions);
+  if (!patch.operations) return JSON.stringify(collection) !== before;
+
+  const existingOperations =
+    collection.operations &&
+    typeof collection.operations === "object" &&
+    !Array.isArray(collection.operations)
+      ? (collection.operations as Record<string, unknown>)
+      : {};
+  let nextOperations: Record<string, unknown> | null = null;
+  for (const operation of CMS_WRITE_OPERATIONS) {
+    if (!(operation in patch.operations)) continue;
+    const current =
+      typeof existingOperations[operation] === "boolean"
+        ? existingOperations[operation]
+        : false;
+    if (current !== patch.operations[operation]) {
+      nextOperations ??= { ...existingOperations };
+      nextOperations[operation] = patch.operations[operation];
+    }
+  }
+  if (nextOperations) collection.operations = nextOperations;
+  return JSON.stringify(collection) !== before;
+}
+
+function applyPermissionsPatch(
+  target: Record<string, unknown>,
+  permissions: CmsPermissionsConfig,
+) {
+  const compact = compactPermissions(permissions);
+  if (compact) {
+    target.permissions = compact;
+  } else {
+    delete target.permissions;
+  }
+}
+
+function compactPermissions(
+  permissions: CmsPermissionsConfig | undefined,
+): CmsPermissionsConfig | undefined {
+  if (!permissions) return undefined;
+  const content = compactRoleMap(permissions.content);
+  const schema = compactRoleMap(permissions.schema);
+  const result: CmsPermissionsConfig = {};
+  if (content) result.content = content;
+  if (schema) result.schema = schema;
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function compactRoleMap<T extends string>(
+  roleMap: Partial<Record<T, CmsRole[]>> | undefined,
+): Partial<Record<T, CmsRole[]>> | undefined {
+  if (!roleMap) return undefined;
+  const entries = Object.entries(roleMap).filter(([, roles]) =>
+    Array.isArray(roles),
+  );
+  return entries.length > 0
+    ? (Object.fromEntries(entries) as Partial<Record<T, CmsRole[]>>)
+    : undefined;
+}
+
+function buildStateFile(path: string, value: Record<string, unknown>) {
+  return { path, content: `${JSON.stringify(value, null, 2)}\n` };
+}
+
+function parseJsonRecord(
+  content: string,
+  path: string,
+): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // handled below
+  }
+  throw new CmsRuntimeError(
+    "invalid_cms_config",
+    `${path} is not valid JSON`,
+    400,
+  );
+}
+
+function handleCmsError(error: unknown, fallback: string): NextResponse {
+  if (error instanceof CmsConfigError || error instanceof CmsRuntimeError) {
+    return NextResponse.json(
+      { error: error.code, message: error.message },
+      { status: error.status, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  const status = (error as { status?: number } | null)?.status;
+  if (status === 401) {
+    return NextResponse.json(
+      { error: "github_token_expired" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
+  }
+  if (
+    status === 403 ||
+    String((error as Error)?.message ?? "").includes("rate limit")
+  ) {
+    return NextResponse.json(
+      { error: "rate_limited", message: "GitHub API rate limit exceeded" },
+      { status: 429, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  logger.error({ err: error }, "cms: request failed");
+  return NextResponse.json(
+    { error: fallback },
+    { status: 500, headers: NO_STORE_HEADERS },
+  );
+}

@@ -1,0 +1,127 @@
+/**
+ * @fileoverview REPRODUCTION — Bug: Vibe "run a task" runner warms up for
+ *   minutes ("Almost ready... 3:24 elapsed") instead of becoming ready fast.
+ *
+ *   The dashboard's "Almost ready" timer waits for the runner to emit a
+ *   `chat.ready` event (written to the backend events log). This test
+ *   drives the exact handoff endpoint the chat uses
+ *   (/api/kody/chat/interactive/start-fly) and measures how long until
+ *   chat.ready appears. It should complete within the Fly boot budget; the
+ *   bug is it takes minutes (or never arrives).
+ *
+ *   This is a pure REPRODUCTION test — it asserts the bug is fixed; expect it
+ *   to FAIL until the warmup is fixed. No product code is touched.
+ *
+ *   BASE_URL=https://kody-dashboard-sable.vercel.app pnpm test:e2e vibe-runner-warmup
+ *
+ * @testFramework playwright
+ * @domain e2e-live
+ */
+import { test, expect } from "@playwright/test";
+
+const BASE_URL =
+  process.env.BASE_URL ?? "https://kody-dashboard-sable.vercel.app";
+const TOKEN = process.env.E2E_GITHUB_TOKEN ?? "";
+const REPO_URL =
+  process.env.E2E_GITHUB_REPO ??
+  "https://github.com/aharonyaircohen/Kody-Engine-Tester";
+
+function parseRepo(url: string): { owner: string; repo: string } {
+  const u = new URL(url);
+  const p = u.pathname.replace(/^\//, "").split("/").filter(Boolean);
+  return { owner: p[0] ?? "", repo: p[1] ?? "" };
+}
+
+const { owner, repo } = parseRepo(REPO_URL);
+
+const CONVEX_URL =
+  process.env.NEXT_PUBLIC_CONVEX_URL ?? process.env.CONVEX_URL ?? "";
+
+/**
+ * Read the session's chat events straight from Convex (the /events/poll
+ * route was removed with the polling fallback; chatEvents.since is the
+ * deliberately-public query the live transport subscribes to).
+ */
+async function readEvents(taskId: string): Promise<Array<{ event?: string }>> {
+  if (!CONVEX_URL) return [];
+  const res = await fetch(`${CONVEX_URL}/api/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      path: "chatEvents:since",
+      args: { tenantId: "global", sessionId: taskId, afterSeq: -1 },
+      format: "json",
+    }),
+  });
+  if (!res.ok) return [];
+  const body = (await res.json()) as {
+    status?: string;
+    value?: Array<{ event?: { event?: string } }>;
+  };
+  if (body.status !== "success" || !Array.isArray(body.value)) return [];
+  return body.value.map((doc) => ({ event: doc.event?.event }));
+}
+
+test.describe("REPRO — Vibe runner warmup", () => {
+  test.skip(!TOKEN, "E2E_GITHUB_TOKEN not set");
+  test.skip(
+    !CONVEX_URL,
+    "NEXT_PUBLIC_CONVEX_URL / CONVEX_URL not set (needed to read chat events)",
+  );
+
+  test("runner emits chat.ready within 90s of the chat handoff", async ({
+    request,
+  }) => {
+    test.setTimeout(6 * 60_000);
+    const taskId = `repro-warmup-${Date.now()}`;
+    const READY_BUDGET_MS = 90_000;
+
+    const t0 = Date.now();
+    // The exact endpoint the Vibe chat hands off to when running a task.
+    const start = await request.post(
+      `${BASE_URL}/api/kody/chat/interactive/start-fly`,
+      {
+        headers: {
+          "x-kody-token": TOKEN,
+          "x-kody-owner": owner,
+          "x-kody-repo": repo,
+          "content-type": "application/json",
+        },
+        data: { taskId, idleExitMs: 120_000, hardCapMs: 300_000 },
+      },
+    );
+    expect(start.ok(), `start-fly HTTP ${start.status()}`).toBe(true);
+    const startBody = (await start.json()) as {
+      runner?: string;
+      machineId?: string;
+    };
+    // eslint-disable-next-line no-console
+    console.log(
+      `[repro-warmup] runner=${startBody.runner} machine=${startBody.machineId}`,
+    );
+
+    // Poll the durable event log for chat.ready, measuring elapsed.
+    let readyAt = -1;
+    const deadline = t0 + 5 * 60_000; // poll up to 5 min so we can REPORT the real time
+    while (Date.now() < deadline) {
+      const events = await readEvents(taskId);
+      if (events.some((e) => e.event === "chat.ready")) {
+        readyAt = Date.now() - t0;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[repro-warmup] chat.ready after ${readyAt < 0 ? ">5min (never)" : `${Math.round(readyAt / 1000)}s`} (runner=${startBody.runner})`,
+    );
+
+    expect(
+      readyAt >= 0 && readyAt <= READY_BUDGET_MS,
+      `runner must be ready within ${READY_BUDGET_MS / 1000}s — was ${
+        readyAt < 0 ? "never (>5min)" : `${Math.round(readyAt / 1000)}s`
+      }. This reproduces the endless "Almost ready..." warmup.`,
+    ).toBe(true);
+  });
+});

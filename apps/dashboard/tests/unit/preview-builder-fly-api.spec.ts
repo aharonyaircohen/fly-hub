@@ -1,0 +1,145 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { createPreviewMachine } from "../../node_modules/@kody-ade/fly/builder/src/fly-api";
+
+interface CapturedRequest {
+  config: {
+    services?: Array<{ autostop?: unknown; autostart?: unknown }>;
+  };
+}
+
+function mockCreateResponse(captured: CapturedRequest[]) {
+  globalThis.fetch = vi.fn(
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      captured.push(JSON.parse(init?.body as string) as CapturedRequest);
+      return new Response(JSON.stringify({ id: "m-builder-preview" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  ) as unknown as typeof fetch;
+}
+
+describe("builder createPreviewMachine autostop", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("allows the final Fly machine create call more time than regular API reads", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const captured: CapturedRequest[] = [];
+    mockCreateResponse(captured);
+
+    await createPreviewMachine(
+      {
+        appName: "kp-test-app",
+        region: "fra",
+        image: "registry.fly.io/kp-test-app:sha",
+      },
+      "fly-test-token",
+    );
+
+    expect(timeoutSpy).toHaveBeenCalledWith(180_000);
+    const fetchMock = globalThis.fetch as unknown as {
+      mock: { calls: Array<[RequestInfo | URL, RequestInit?]> };
+    };
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://api.machines.dev/v1/apps/kp-test-app/machines",
+    );
+  });
+
+  it("retries transient Fly timeouts while creating the preview machine", async () => {
+    vi.useFakeTimers();
+    const captured: CapturedRequest[] = [];
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("", { status: 408 }))
+      .mockImplementationOnce(
+        async (_input: RequestInfo | URL, init?: RequestInit) => {
+          captured.push(JSON.parse(init?.body as string) as CapturedRequest);
+          return new Response(JSON.stringify({ id: "m-builder-preview" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      ) as unknown as typeof fetch;
+
+    const created = createPreviewMachine(
+      {
+        appName: "kp-test-app",
+        region: "fra",
+        image: "registry.fly.io/kp-test-app:sha",
+      },
+      "fly-test-token",
+    );
+    await vi.runAllTimersAsync();
+
+    const id = await created;
+    expect(id).toBe("m-builder-preview");
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(captured[0].config).toMatchObject({
+      image: "registry.fly.io/kp-test-app:sha",
+    });
+  });
+
+  it("uses suspend for previews at or below Fly's 2 GB suspend limit", async () => {
+    const captured: CapturedRequest[] = [];
+    mockCreateResponse(captured);
+
+    await createPreviewMachine(
+      {
+        appName: "kp-test-app",
+        region: "fra",
+        image: "registry.fly.io/kp-test-app:sha",
+        memoryMb: 2048,
+        idleSuspend: true,
+      },
+      "fly-test-token",
+    );
+
+    expect(captured[0].config.services?.[0]).toMatchObject({
+      autostop: "suspend",
+      autostart: true,
+    });
+  });
+
+  it("stops oversized previews instead of asking Fly to suspend them", async () => {
+    const captured: CapturedRequest[] = [];
+    mockCreateResponse(captured);
+
+    await createPreviewMachine(
+      {
+        appName: "kp-test-app",
+        region: "fra",
+        image: "registry.fly.io/kp-test-app:sha",
+        memoryMb: 4096,
+        idleSuspend: true,
+      },
+      "fly-test-token",
+    );
+
+    expect(captured[0].config.services?.[0]).toMatchObject({
+      autostop: true,
+      autostart: true,
+    });
+  });
+
+  it("honors idleSuspend=false", async () => {
+    const captured: CapturedRequest[] = [];
+    mockCreateResponse(captured);
+
+    await createPreviewMachine(
+      {
+        appName: "kp-test-app",
+        region: "fra",
+        image: "registry.fly.io/kp-test-app:sha",
+        memoryMb: 2048,
+        idleSuspend: false,
+      },
+      "fly-test-token",
+    );
+
+    expect(captured[0].config.services?.[0]?.autostop).toBe("off");
+  });
+});

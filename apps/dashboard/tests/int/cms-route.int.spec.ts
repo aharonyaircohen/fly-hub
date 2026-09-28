@@ -1,0 +1,1993 @@
+import { NextRequest } from "next/server";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+import { CmsConfigError, invalidateCmsConfigCache } from "@kody-ade/cms/config";
+import type { CmsConfigState } from "@kody-ade/cms/types";
+
+const auth = vi.hoisted(() => ({
+  requireKodyAuth: vi.fn(async () => null),
+  getRequestAuth: vi.fn(() => ({
+    token: "ghp_test",
+    owner: "A-Guy-educ",
+    repo: "A-Guy-Web",
+    storeRepoUrl: "https://github.com/aharonyaircohen/kody-ai-agency-catalog",
+    storeRef: "stable",
+  })),
+  getUserOctokit: vi.fn(async () => ({
+    __octokit: true,
+    repos: {
+      getCollaboratorPermissionLevel: vi.fn(async () => ({
+        data: { permission: "admin" },
+      })),
+    },
+  })),
+  verifyActorLogin: vi.fn(async () => ({
+    identity: { login: "aguy", avatar_url: "", githubId: 1 },
+  })),
+  resolveActorFromToken: vi.fn(async () => ({
+    login: "aguy",
+    avatarUrl: "",
+    githubId: 1,
+  })),
+}));
+
+const github = vi.hoisted(() => ({
+  setGitHubContext: vi.fn(),
+  clearGitHubContext: vi.fn(),
+}));
+
+const service = vi.hoisted(() => ({
+  listCmsCollections: vi.fn(async (): Promise<CmsConfigState> => ({
+    configured: false,
+    collections: [],
+  })),
+  listCmsDocuments: vi.fn(async () => ({
+    docs: [],
+    total: 0,
+    limit: 50,
+    offset: 0,
+  })),
+  getCmsDocument: vi.fn(
+    async (): Promise<Record<string, unknown> | null> => null,
+  ),
+  createCmsDocument: vi.fn(async () => ({ _id: "new-id", title: "Created" })),
+  updateCmsDocument: vi.fn(async () => ({ _id: "1", title: "Updated" })),
+  deleteCmsDocument: vi.fn(async () => true),
+  parseCmsListQuery: vi.fn(() => ({})),
+  CmsRuntimeError: class CmsRuntimeError extends Error {
+    readonly code: string;
+    readonly status: number;
+
+    constructor(code: string, message: string, status = 500) {
+      super(message);
+      this.name = "CmsRuntimeError";
+      this.code = code;
+      this.status = status;
+    }
+  },
+}));
+
+const stateRepo = vi.hoisted(() => ({
+  readStateText: vi.fn(
+    async (..._args: unknown[]): Promise<unknown | null> => null,
+  ),
+  writeStateText: vi.fn(async (_input: unknown): Promise<void> => undefined),
+  writeStateFiles: vi.fn(async (_input: unknown): Promise<void> => undefined),
+  deleteStateFile: vi.fn(async (_input: unknown): Promise<void> => undefined),
+}));
+vi.mock("@kody-ade/cms/repo-docs", () => ({
+  runWithCmsRepoDocsStore: <T>(_store: unknown, callback: () => T): T =>
+    callback(),
+  readCmsFile: async (owner: string, repo: string, filePath: string) =>
+    stateRepo.readStateText({}, owner, repo, filePath),
+  readRepoDocFile: (...args: unknown[]) => stateRepo.readStateText(...args),
+  writeRepoDocFile: (input: unknown) => stateRepo.writeStateText(input),
+  writeRepoDocFiles: (input: unknown) => stateRepo.writeStateFiles(input),
+  deleteRepoDocFile: (input: unknown) => stateRepo.deleteStateFile(input),
+}));
+
+const mongoSchema = vi.hoisted(() => ({
+  generateMongoCmsSchemaFiles: vi.fn(async () => ({
+    collectionCount: 1,
+    files: [
+      {
+        path: "cms/config.json",
+        content:
+          '{\n  "version": 1,\n  "name": "Example CMS",\n  "collections": ["collections/lessons.json"]\n}\n',
+      },
+      {
+        path: "cms/collections/lessons.json",
+        content: '{\n  "name": "lessons"\n}\n',
+      },
+    ],
+  })),
+}));
+
+const vault = vi.hoisted(() => ({
+  getSecret: vi.fn(async () => "mongodb://localhost/a-guy-dev"),
+}));
+
+vi.mock("@kody-ade/base/auth", () => auth);
+vi.mock("@dashboard/lib/github-client", () => github);
+vi.mock("@kody-ade/cms/service", () => service);
+vi.mock("@kody-ade/cms/schema/mongodb", () => mongoSchema);
+vi.mock("@kody-ade/base/vault/get-secret", () => vault);
+
+import {
+  GET as collectionGET,
+  POST as collectionPOST,
+} from "../../app/api/kody/cms/[collection]/route";
+import {
+  DELETE as documentDELETE,
+  GET as documentGET,
+  PATCH as documentPATCH,
+} from "../../app/api/kody/cms/[collection]/[id]/route";
+import {
+  GET as indexGET,
+  PATCH as indexPATCH,
+  POST as indexPOST,
+} from "../../app/api/kody/cms/route";
+import {
+  DELETE as mcpDELETE,
+  GET as mcpGET,
+  POST as mcpPOST,
+} from "../../app/api/kody/cms/mcp/route";
+import {
+  DELETE as modelDELETE,
+  PATCH as modelPATCH,
+} from "../../app/api/kody/cms/model/route";
+import { POST as schemaPOST } from "../../app/api/kody/cms/schema/route";
+
+function request(url = "https://dash.test/api/kody/cms") {
+  return new NextRequest(url, {
+    headers: {
+      "x-kody-token": "ghp_test",
+      "x-kody-owner": "A-Guy-educ",
+      "x-kody-repo": "A-Guy-Web",
+    },
+  });
+}
+
+function postRequest(body: unknown) {
+  return new NextRequest("https://dash.test/api/kody/cms", {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: {
+      "content-type": "application/json",
+      "x-kody-token": "ghp_test",
+      "x-kody-owner": "A-Guy-educ",
+      "x-kody-repo": "A-Guy-Web",
+    },
+  });
+}
+
+function jsonRequest(url: string, method: string, body?: unknown) {
+  return new NextRequest(url, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: {
+      "content-type": "application/json",
+      "x-kody-token": "ghp_test",
+      "x-kody-owner": "A-Guy-educ",
+      "x-kody-repo": "A-Guy-Web",
+    },
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  invalidateCmsConfigCache();
+  stateRepo.readStateText.mockResolvedValue(null);
+  stateRepo.writeStateText.mockResolvedValue(undefined);
+  stateRepo.writeStateFiles.mockResolvedValue(undefined);
+  stateRepo.deleteStateFile.mockResolvedValue(undefined);
+});
+
+describe("CMS API routes", () => {
+  it("returns configured false when CMS is absent", async () => {
+    const res = await indexGET(request());
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      cms: { configured: false, collections: [] },
+    });
+  });
+
+  it("lists CMS documents with filters, sort, and pagination", async () => {
+    const filters = { title: { contains: "Intro" } };
+    const ids = ["64f1a5f6f2a80f3a3a3a3a3a", "external-id"];
+    service.parseCmsListQuery.mockReturnValueOnce({
+      ids,
+      filters,
+      sort: [
+        { field: "title", direction: "asc" },
+        { field: "updatedAt", direction: "desc" },
+      ],
+      limit: 10,
+      offset: 20,
+    });
+    const res = await collectionGET(
+      request(
+        `https://dash.test/api/kody/cms/lessons?filters=${encodeURIComponent(
+          JSON.stringify(filters),
+        )}&ids=${ids.join(",")}&sort=title:asc,updatedAt:desc&limit=10&offset=20`,
+      ),
+      { params: Promise.resolve({ collection: "lessons" }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(service.listCmsDocuments).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "A-Guy-educ",
+      "A-Guy-Web",
+      "lessons",
+      {
+        ids,
+        filters,
+        sort: [
+          { field: "title", direction: "asc" },
+          { field: "updatedAt", direction: "desc" },
+        ],
+        limit: 10,
+        offset: 20,
+      },
+    );
+    await expect(res.json()).resolves.toMatchObject({
+      docs: [],
+      total: 0,
+    });
+  });
+
+  it("creates a neutral CMS config in the backend", async () => {
+    const res = await indexPOST(
+      postRequest({ name: "Example CMS", adapter: "github" }),
+    );
+
+    expect(res.status).toBe(201);
+    await expect(res.json()).resolves.toMatchObject({
+      cms: {
+        configured: true,
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "github",
+        writePolicy: "read-only",
+        collections: [],
+      },
+    });
+    expect(stateRepo.writeStateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "A-Guy-educ",
+        repo: "A-Guy-Web",
+        path: "cms/config.json",
+        message: "chore(cms): create CMS config",
+      }),
+    );
+    const write = stateRepo.writeStateText.mock.calls[0][0] as {
+      content: string;
+    };
+    expect(JSON.parse(write.content)).toEqual({
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      defaultAdapter: "github",
+      adapters: { github: {} },
+      writePolicy: "read-only",
+      collections: [],
+    });
+    expect(auth.verifyActorLogin).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsafe CMS adapter names", async () => {
+    const res = await indexPOST(
+      postRequest({ name: "Example CMS", adapter: "../github" }),
+    );
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "invalid_body",
+      message: "adapter name is invalid",
+    });
+    expect(stateRepo.writeStateText).not.toHaveBeenCalled();
+  });
+
+  it("switches the configured CMS adapter in backend", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "mongodb",
+        adapters: {
+          mongodb: { databaseUriSecret: "DATABASE_URL" },
+        },
+        writePolicy: "enabled",
+        collections: ["collections/lessons.json"],
+      }),
+    };
+    const lessonsConfig = {
+      path: "cms/collections/lessons.json",
+      sha: "lessons-sha",
+      content: JSON.stringify({
+        name: "lessons",
+        label: "Lessons",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "lessons", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+    };
+    stateRepo.readStateText
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(lessonsConfig)
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(lessonsConfig);
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      defaultAdapter: "github",
+      writePolicy: "enabled",
+      permissions: {
+        content: {
+          list: ["viewer", "editor", "admin"],
+          get: ["viewer", "editor", "admin"],
+          search: ["viewer", "editor", "admin"],
+          create: ["editor", "admin"],
+          update: ["editor", "admin"],
+          delete: ["admin"],
+        },
+        schema: { generate: ["admin"], refresh: ["admin"], edit: ["admin"] },
+      },
+      collections: [
+        {
+          name: "lessons",
+          label: "Lessons",
+          adapter: "mongodb",
+          writePolicy: "enabled",
+          source: { collection: "lessons", idField: "_id" },
+          searchFields: [],
+          operations: {
+            list: true,
+            get: true,
+            search: true,
+            create: true,
+            update: true,
+            delete: true,
+          },
+          defaultSort: [],
+          fields: [],
+          filters: [],
+        },
+      ],
+    });
+
+    const res = await indexPATCH(
+      jsonRequest("https://dash.test/api/kody/cms", "PATCH", {
+        adapter: "github",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      message: string;
+      files: Array<{ path: string; content: string }>;
+    };
+    expect(write.message).toBe("chore(cms): update CMS adapter");
+    const rootFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/config.json",
+    );
+    expect(JSON.parse(rootFile!.content)).toMatchObject({
+      defaultAdapter: "github",
+      adapters: {
+        mongodb: { databaseUriSecret: "DATABASE_URL" },
+        github: {},
+      },
+    });
+    const lessonFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/collections/lessons.json",
+    );
+    expect(JSON.parse(lessonFile!.content).adapter).toBe("github");
+    await expect(res.json()).resolves.toMatchObject({
+      cms: { defaultAdapter: "github" },
+    });
+  });
+
+  it("updates CMS adapter settings in backend", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "mongodb",
+        writePolicy: "enabled",
+        adapters: {
+          mongodb: { databaseUriSecret: "DATABASE_URL" },
+        },
+        collections: [],
+      }),
+    };
+    stateRepo.readStateText
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(rootConfig);
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      defaultAdapter: "file",
+      writePolicy: "enabled",
+      permissions: {
+        content: {
+          list: ["viewer", "editor", "admin"],
+          get: ["viewer", "editor", "admin"],
+          search: ["viewer", "editor", "admin"],
+          create: ["editor", "admin"],
+          update: ["editor", "admin"],
+          delete: ["admin"],
+        },
+        schema: {
+          generate: ["admin"],
+          refresh: ["admin"],
+          edit: ["admin"],
+        },
+      },
+      adapters: {
+        file: { rootDir: "content/data" },
+      },
+      collections: [],
+    });
+
+    const res = await indexPATCH(
+      jsonRequest("https://dash.test/api/kody/cms", "PATCH", {
+        adapter: "file",
+        adapterSettings: { rootDir: "content/data" },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      files: Array<{ path: string; content: string }>;
+    };
+    const rootFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/config.json",
+    );
+    expect(JSON.parse(rootFile!.content)).toMatchObject({
+      defaultAdapter: "file",
+      adapters: {
+        file: { rootDir: "content/data" },
+      },
+    });
+  });
+
+  it("updates CMS permissions in backend", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "mongodb",
+        writePolicy: "enabled",
+        collections: ["collections/lessons.json"],
+      }),
+    };
+    const lessonsConfig = {
+      path: "cms/collections/lessons.json",
+      sha: "lessons-sha",
+      content: JSON.stringify({
+        name: "lessons",
+        label: "Lessons",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "lessons", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+    };
+    stateRepo.readStateText
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(lessonsConfig)
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(lessonsConfig);
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      writePolicy: "enabled",
+      permissions: {
+        content: {
+          list: ["viewer", "editor", "admin"],
+          get: ["viewer", "editor", "admin"],
+          search: ["viewer", "editor", "admin"],
+          create: ["editor", "admin"],
+          update: ["editor", "admin"],
+          delete: ["admin"],
+        },
+        schema: { generate: ["admin"], refresh: ["admin"], edit: ["admin"] },
+      },
+      collections: [],
+    });
+
+    const res = await indexPATCH(
+      jsonRequest("https://dash.test/api/kody/cms", "PATCH", {
+        collections: [
+          {
+            name: "lessons",
+            operations: { create: true, update: true, delete: false },
+            permissions: {
+              content: { update: ["editor"], delete: ["admin"] },
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      message: string;
+      files: Array<{ path: string; content: string }>;
+    };
+    expect(write.message).toBe("chore(cms): update CMS permissions");
+    const lessonFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/collections/lessons.json",
+    );
+    expect(JSON.parse(lessonFile!.content).permissions.content).toMatchObject({
+      update: ["editor", "admin"],
+      delete: ["admin"],
+    });
+    expect(JSON.parse(lessonFile!.content).operations).toMatchObject({
+      create: true,
+      update: true,
+      delete: false,
+    });
+  });
+
+  it("does not rewrite unchanged collection files when global permissions change", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "mongodb",
+        writePolicy: "enabled",
+        collections: ["collections/lessons.json", "collections/courses.json"],
+      }),
+    };
+    const lessonConfig = {
+      path: "cms/collections/lessons.json",
+      sha: "lessons-sha",
+      content: JSON.stringify({
+        name: "lessons",
+        label: "Lessons",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "lessons", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+    };
+    const courseConfig = {
+      path: "cms/collections/courses.json",
+      sha: "courses-sha",
+      content: JSON.stringify({
+        name: "courses",
+        label: "Courses",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "courses", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+    };
+    stateRepo.readStateText
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(lessonConfig)
+      .mockResolvedValueOnce(courseConfig)
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(lessonConfig)
+      .mockResolvedValueOnce(courseConfig);
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      writePolicy: "enabled",
+      permissions: {
+        content: {
+          list: ["viewer", "editor", "admin"],
+          get: ["viewer", "editor", "admin"],
+          search: ["viewer", "editor", "admin"],
+          create: ["admin"],
+          update: ["editor", "admin"],
+          delete: ["admin"],
+        },
+        schema: { generate: ["admin"], refresh: ["admin"], edit: ["admin"] },
+      },
+      collections: [],
+    });
+
+    const res = await indexPATCH(
+      jsonRequest("https://dash.test/api/kody/cms", "PATCH", {
+        permissions: {
+          content: {
+            list: ["viewer", "editor", "admin"],
+            get: ["viewer", "editor", "admin"],
+            search: ["viewer", "editor", "admin"],
+            create: ["admin"],
+            update: ["editor", "admin"],
+            delete: ["admin"],
+          },
+          schema: {
+            generate: ["admin"],
+            refresh: ["admin"],
+            edit: ["admin"],
+          },
+        },
+        collections: [
+          {
+            name: "lessons",
+            operations: { create: true, update: true, delete: true },
+            permissions: {},
+          },
+          {
+            name: "courses",
+            operations: { create: true, update: true, delete: true },
+            permissions: {},
+          },
+        ],
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      files: Array<{ path: string; content: string }>;
+    };
+    expect(write.files.map((file) => file.path)).toEqual(["cms/config.json"]);
+    expect(
+      JSON.parse(write.files[0].content).permissions.content.create,
+    ).toEqual(["admin"]);
+  });
+
+  it("updates CMS permissions for a normalized collection name", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "mongodb",
+        writePolicy: "enabled",
+        collections: ["collections/A.json"],
+      }),
+    };
+    const collectionConfig = {
+      path: "cms/collections/A.json",
+      sha: "collection-sha",
+      content: JSON.stringify({
+        name: "A",
+        label: "A",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "A", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+    };
+    stateRepo.readStateText
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(collectionConfig)
+      .mockResolvedValueOnce(rootConfig)
+      .mockResolvedValueOnce(collectionConfig);
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      writePolicy: "enabled",
+      permissions: {},
+      collections: [],
+    });
+
+    const res = await indexPATCH(
+      jsonRequest("https://dash.test/api/kody/cms", "PATCH", {
+        collections: [
+          {
+            name: "a",
+            operations: { create: true, update: true, delete: false },
+            permissions: {},
+          },
+        ],
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      files: Array<{ path: string; content: string }>;
+    };
+    const collectionFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/collections/A.json",
+    );
+    expect(JSON.parse(collectionFile!.content).operations).toMatchObject({
+      create: true,
+      update: true,
+      delete: false,
+    });
+  });
+
+  it("deletes a CMS model resource from config and schema file", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "mongodb",
+        writePolicy: "enabled",
+        collections: ["collections/lessons.json"],
+      }),
+    };
+    const lessonsConfig = {
+      path: "cms/collections/lessons.json",
+      sha: "lessons-sha",
+      content: JSON.stringify({
+        name: "lessons",
+        label: "Lessons",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "lessons", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+    };
+    stateRepo.readStateText.mockImplementation(async (...args: unknown[]) => {
+      const path = args[3];
+      if (path === "cms/config.json") return rootConfig;
+      if (path === "cms/collections/lessons.json") return lessonsConfig;
+      return null;
+    });
+    const res = await modelDELETE(
+      jsonRequest("https://dash.test/api/kody/cms/model", "DELETE", {
+        name: "lessons",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      message: string;
+      files: Array<{ path: string; content: string }>;
+    };
+    expect(write.message).toBe("chore(cms): delete lessons schema");
+    const rootFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/config.json",
+    );
+    const nextRoot = JSON.parse(rootFile!.content);
+    expect(nextRoot.collections).toEqual([]);
+    expect(nextRoot.schemaGeneration.skipCollections).toEqual(["lessons"]);
+    expect(stateRepo.deleteStateFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "cms/collections/lessons.json",
+        sha: "lessons-sha",
+      }),
+    );
+    expect(service.listCmsCollections).not.toHaveBeenCalled();
+    await expect(res.json()).resolves.toMatchObject({
+      deleted: true,
+      cms: { collections: [] },
+    });
+  });
+
+  it("deletes a CMS model resource from object config when key differs from resource name", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "mongodb",
+        writePolicy: "enabled",
+        collections: {
+          "collections/generated-a.json": {
+            name: "a",
+            label: "A",
+            adapter: "mongodb",
+            writePolicy: "enabled",
+            source: { collection: "A", idField: "_id" },
+            operations: {
+              list: true,
+              get: true,
+              search: true,
+              create: true,
+              update: true,
+              delete: true,
+            },
+            fields: [{ name: "_id", type: "id" }],
+            filters: [],
+          },
+        },
+      }),
+    };
+    stateRepo.readStateText.mockImplementation(async (...args: unknown[]) => {
+      const path = args[3];
+      if (path === "cms/config.json") return rootConfig;
+      return null;
+    });
+
+    const res = await modelDELETE(
+      jsonRequest("https://dash.test/api/kody/cms/model", "DELETE", {
+        name: "a",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      files: Array<{ path: string; content: string }>;
+    };
+    const rootFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/config.json",
+    );
+    const nextRoot = JSON.parse(rootFile!.content);
+    expect(nextRoot.collections).toEqual({});
+    expect(nextRoot.schemaGeneration.skipCollections).toHaveLength(3);
+    expect(nextRoot.schemaGeneration.skipCollections).toEqual(
+      expect.arrayContaining(["A", "a", "generated-a"]),
+    );
+    expect(stateRepo.deleteStateFile).not.toHaveBeenCalled();
+    await expect(res.json()).resolves.toMatchObject({
+      deleted: true,
+      cms: { collections: [] },
+    });
+  });
+
+  it("deletes a normalized CMS model resource from an uppercase schema file", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        defaultAdapter: "mongodb",
+        writePolicy: "enabled",
+        collections: ["collections/A.json"],
+      }),
+    };
+    const collectionConfig = {
+      path: "cms/collections/A.json",
+      sha: "a-sha",
+      content: JSON.stringify({
+        name: "A",
+        label: "A",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "A", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+    };
+    stateRepo.readStateText.mockImplementation(async (...args: unknown[]) => {
+      const path = args[3];
+      if (path === "cms/config.json") return rootConfig;
+      if (path === "cms/collections/A.json") return collectionConfig;
+      return null;
+    });
+
+    const res = await modelDELETE(
+      jsonRequest("https://dash.test/api/kody/cms/model", "DELETE", {
+        name: "a",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      files: Array<{ path: string; content: string }>;
+    };
+    const rootFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/config.json",
+    );
+    const nextRoot = JSON.parse(rootFile!.content);
+    expect(nextRoot.collections).toEqual([]);
+    expect(nextRoot.schemaGeneration.skipCollections).toHaveLength(2);
+    expect(nextRoot.schemaGeneration.skipCollections).toEqual(
+      expect.arrayContaining(["A", "a"]),
+    );
+    expect(stateRepo.deleteStateFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "cms/collections/A.json",
+        sha: "a-sha",
+      }),
+    );
+  });
+
+  it("updates a normalized CMS model resource in its existing schema file", async () => {
+    let rootContent = JSON.stringify({
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      environmentFile: "environments/default.json",
+      defaultAdapter: "mongodb",
+      writePolicy: "enabled",
+      collections: ["collections/A.json"],
+    });
+    const environmentConfig = {
+      path: "cms/environments/default.json",
+      sha: "env-sha",
+      content: JSON.stringify({
+        name: "default",
+        adapter: "mongodb",
+        databaseUriSecret: "DATABASE_URL",
+        writePolicy: "enabled",
+      }),
+    };
+    let collectionContent = JSON.stringify({
+      name: "A",
+      label: "A",
+      adapter: "mongodb",
+      writePolicy: "enabled",
+      source: { collection: "A", idField: "_id" },
+      operations: {
+        list: true,
+        get: true,
+        search: true,
+        create: true,
+        update: true,
+        delete: true,
+      },
+      fields: [
+        { name: "_id", type: "id" },
+        { name: "title", type: "text", label: "Title" },
+      ],
+      filters: [],
+    });
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      get content() {
+        return rootContent;
+      },
+    };
+    const collectionConfig = {
+      path: "cms/collections/A.json",
+      sha: "a-sha",
+      get content() {
+        return collectionContent;
+      },
+    };
+    stateRepo.readStateText.mockImplementation(async (...args: unknown[]) => {
+      const path = args[3];
+      if (path === "cms/config.json") return rootConfig;
+      if (path === "cms/environments/default.json") return environmentConfig;
+      if (path === "cms/collections/A.json") return collectionConfig;
+      return null;
+    });
+    stateRepo.writeStateFiles.mockImplementationOnce(async (input: unknown) => {
+      const files = (
+        input as { files: Array<{ path: string; content: string }> }
+      ).files;
+      rootContent =
+        files.find((file) => file.path === "cms/config.json")?.content ??
+        rootContent;
+      collectionContent =
+        files.find((file) => file.path === "cms/collections/A.json")?.content ??
+        collectionContent;
+    });
+
+    const res = await modelPATCH(
+      jsonRequest("https://dash.test/api/kody/cms/model", "PATCH", {
+        originalName: "a",
+        collection: {
+          name: "a",
+          label: "A changed",
+          source: { collection: "A", idField: "_id" },
+          fields: [{ name: "title", type: "text", label: "Updated Title" }],
+        },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      files: Array<{ path: string; content: string }>;
+    };
+    expect(write.files.map((file) => file.path)).toContain(
+      "cms/collections/A.json",
+    );
+    expect(write.files.map((file) => file.path)).not.toContain(
+      "cms/collections/a.json",
+    );
+    const collectionFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/collections/A.json",
+    );
+    const savedCollection = JSON.parse(collectionFile!.content);
+    expect(savedCollection.name).toBe("a");
+    expect(savedCollection.label).toBe("A changed");
+    expect(savedCollection.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "title", label: "Updated Title" }),
+      ]),
+    );
+    const rootFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/config.json",
+    );
+    expect(JSON.parse(rootFile!.content).collections).toEqual([
+      "collections/A.json",
+    ]);
+    await expect(res.json()).resolves.toMatchObject({
+      cms: {
+        collections: [
+          {
+            name: "a",
+            label: "A changed",
+            fields: expect.arrayContaining([
+              expect.objectContaining({
+                name: "title",
+                label: "Updated Title",
+              }),
+            ]),
+          },
+        ],
+      },
+    });
+  });
+
+  it("fails a CMS model save when the saved state still has the removed field", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      sha: "config-sha",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        environmentFile: "environments/default.json",
+        defaultAdapter: "mongodb",
+        writePolicy: "enabled",
+        collections: ["collections/exercises.json"],
+      }),
+    };
+    const environmentConfig = {
+      path: "cms/environments/default.json",
+      sha: "env-sha",
+      content: JSON.stringify({
+        name: "default",
+        adapter: "mongodb",
+        databaseUriSecret: "DATABASE_URL",
+        writePolicy: "enabled",
+      }),
+    };
+    const collectionConfig = {
+      path: "cms/collections/exercises.json",
+      sha: "exercises-sha",
+      content: JSON.stringify({
+        name: "exercises",
+        label: "Exercises",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "exercises", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [
+          { name: "_id", type: "id", readOnly: true },
+          { name: "title", type: "text", label: "Title" },
+          { name: "content", type: "object", label: "Content" },
+        ],
+        filters: [],
+      }),
+    };
+    stateRepo.readStateText.mockImplementation(async (...args: unknown[]) => {
+      const path = args[3];
+      if (path === "cms/config.json") return rootConfig;
+      if (path === "cms/environments/default.json") return environmentConfig;
+      if (path === "cms/collections/exercises.json") return collectionConfig;
+      return null;
+    });
+
+    const res = await modelPATCH(
+      jsonRequest("https://dash.test/api/kody/cms/model", "PATCH", {
+        originalName: "exercises",
+        collection: {
+          name: "exercises",
+          label: "Exercises",
+          source: { collection: "exercises", idField: "_id" },
+          fields: [{ name: "title", type: "text", label: "Title" }],
+        },
+      }),
+    );
+
+    expect(res.status).toBe(500);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "cms_model_not_saved",
+      message: "CMS model save did not persist. Please retry.",
+    });
+  });
+
+  it("does not overwrite an existing CMS config", async () => {
+    stateRepo.readStateText.mockResolvedValueOnce({
+      path: "A-Guy-Web/cms/config.json",
+      content: "{}",
+      sha: "sha",
+    });
+
+    const res = await indexPOST(postRequest({ name: "Example CMS" }));
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "cms_already_configured",
+      message: "CMS is already configured for this repo.",
+    });
+    expect(stateRepo.writeStateText).not.toHaveBeenCalled();
+    expect(auth.verifyActorLogin).not.toHaveBeenCalled();
+  });
+
+  it("generates CMS schema into the backend", async () => {
+    stateRepo.readStateText.mockResolvedValueOnce({
+      path: "cms/config.json",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        environment: "default",
+        writePolicy: "read-only",
+        collections: [],
+      }),
+      sha: "config-sha",
+    });
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      defaultAdapter: "mongodb",
+      writePolicy: "enabled",
+      permissions: {
+        content: {
+          list: ["viewer", "editor", "admin"],
+          get: ["viewer", "editor", "admin"],
+          search: ["viewer", "editor", "admin"],
+          create: ["editor", "admin"],
+          update: ["editor", "admin"],
+          delete: ["admin"],
+        },
+        schema: {
+          generate: ["admin"],
+          refresh: ["admin"],
+          edit: ["admin"],
+        },
+      },
+      collections: [
+        {
+          name: "lessons",
+          label: "Lessons",
+          adapter: "mongodb",
+          source: { collection: "lessons", idField: "_id" },
+          searchFields: ["title"],
+          writePolicy: "enabled",
+          operations: {
+            list: true,
+            get: true,
+            search: true,
+            create: true,
+            update: true,
+            delete: true,
+          },
+          defaultSort: [],
+          fields: [{ name: "_id", type: "id" }],
+          filters: [],
+        },
+      ],
+    } as CmsConfigState);
+
+    const res = await schemaPOST(
+      jsonRequest("https://dash.test/api/kody/cms/schema", "POST", {
+        adapter: "mongodb",
+      }),
+    );
+
+    expect(res.status).toBe(201);
+    expect(vault.getSecret).toHaveBeenCalledWith(
+      "DATABASE_URL",
+      expect.anything(),
+    );
+    expect(stateRepo.readStateText).toHaveBeenCalledWith(
+      expect.anything(),
+      "A-Guy-educ",
+      "A-Guy-Web",
+      "cms/config.json",
+    );
+    expect(mongoSchema.generateMongoCmsSchemaFiles).toHaveBeenCalledWith(
+      expect.objectContaining({
+        uri: "mongodb://localhost/a-guy-dev",
+        databaseUriSecret: "DATABASE_URL",
+        repoName: "A-Guy-Web",
+        environment: "default",
+        sampleSize: 100,
+        skipCollections: [],
+      }),
+    );
+    expect(mongoSchema.generateMongoCmsSchemaFiles).toHaveBeenCalledWith(
+      expect.not.objectContaining({ databaseName: "" }),
+    );
+    expect(stateRepo.writeStateFiles).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "A-Guy-educ",
+        repo: "A-Guy-Web",
+        message: "chore(cms): generate CMS schema",
+      }),
+    );
+    await expect(res.json()).resolves.toMatchObject({
+      generated: { collections: 1 },
+      cms: { configured: true, collections: [{ name: "lessons" }] },
+    });
+  });
+
+  it("does not write an empty generated schema", async () => {
+    stateRepo.readStateText.mockResolvedValueOnce({
+      path: "cms/config.json",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        collections: [],
+      }),
+      sha: "config-sha",
+    });
+    mongoSchema.generateMongoCmsSchemaFiles.mockResolvedValueOnce({
+      collectionCount: 0,
+      files: [],
+    });
+
+    const res = await schemaPOST(
+      jsonRequest("https://dash.test/api/kody/cms/schema", "POST", {
+        adapter: "mongodb",
+      }),
+    );
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "cms_schema_empty",
+      message: "No MongoDB collections found from DATABASE_URL.",
+    });
+    expect(stateRepo.writeStateFiles).not.toHaveBeenCalled();
+  });
+
+  it("refreshes only the selected database connection", async () => {
+    const root = {
+      version: 1,
+      name: "Example CMS",
+      defaultAdapter: "primary-db",
+      adapters: {
+        "primary-db": { adapter: "mongodb", databaseUriSecret: "PRIMARY_URL" },
+        "archive-db": { adapter: "mongodb", databaseUriSecret: "ARCHIVE_URL" },
+      },
+      writePolicy: "enabled",
+      collections: [
+        "collections/products.json",
+        "collections/archive-old.json",
+      ],
+    };
+    const collection = (name: string, adapter: string) => ({
+      name,
+      label: name,
+      adapter,
+      writePolicy: "enabled",
+      source: { collection: name, idField: "_id" },
+      operations: {
+        list: true,
+        get: true,
+        search: true,
+        create: true,
+        update: true,
+        delete: true,
+      },
+      fields: [{ name: "_id", type: "id" }],
+      filters: [],
+    });
+    stateRepo.readStateText.mockImplementation(async (...args: unknown[]) => {
+      const path = args[3];
+      if (path === "cms/config.json")
+        return { path, content: JSON.stringify(root), sha: "root" };
+      if (path === "cms/collections/products.json")
+        return {
+          path,
+          content: JSON.stringify(collection("products", "primary-db")),
+          sha: "products",
+        };
+      if (path === "cms/collections/archive-old.json")
+        return {
+          path,
+          content: JSON.stringify(collection("archive-old", "archive-db")),
+          sha: "archive",
+        };
+      return null;
+    });
+    mongoSchema.generateMongoCmsSchemaFiles.mockResolvedValueOnce({
+      collectionCount: 1,
+      files: [
+        {
+          path: "cms/config.json",
+          content: JSON.stringify({
+            version: 1,
+            name: "Example CMS",
+            collections: ["collections/archive-new.json"],
+          }),
+        },
+        {
+          path: "cms/collections/archive-new.json",
+          content: JSON.stringify(collection("archive-new", "mongodb")),
+        },
+      ],
+    });
+
+    const res = await schemaPOST(
+      jsonRequest("https://dash.test/api/kody/cms/schema", "POST", {
+        adapter: "mongodb",
+        connectionName: "archive-db",
+        refresh: true,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(vault.getSecret).toHaveBeenCalledWith(
+      "ARCHIVE_URL",
+      expect.anything(),
+    );
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      files: Array<{ path: string; content: string }>;
+    };
+    const writtenRoot = JSON.parse(
+      write.files.find((file) => file.path === "cms/config.json")!.content,
+    );
+    expect(writtenRoot.collections).toEqual([
+      "collections/archive-new.json",
+      "collections/products.json",
+    ]);
+    const generatedCollection = JSON.parse(
+      write.files.find(
+        (file) => file.path === "cms/collections/archive-new.json",
+      )!.content,
+    );
+    expect(generatedCollection.adapter).toBe("archive-db");
+  });
+
+  it("does not regenerate schema when collections already exist", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        schemaGeneration: { skipCollections: ["A"] },
+        collections: ["collections/lessons.json"],
+      }),
+      sha: "config-sha",
+    };
+    const lessonsConfig = {
+      path: "cms/collections/lessons.json",
+      content: JSON.stringify({
+        name: "lessons",
+        label: "Lessons",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "lessons", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+      sha: "lessons-sha",
+    };
+    stateRepo.readStateText.mockImplementation(async (...args: unknown[]) => {
+      const path = args[3];
+      if (path === "cms/config.json") return rootConfig;
+      if (path === "cms/collections/lessons.json") return lessonsConfig;
+      return null;
+    });
+
+    const res = await schemaPOST(
+      jsonRequest("https://dash.test/api/kody/cms/schema", "POST", {
+        adapter: "mongodb",
+      }),
+    );
+
+    expect(res.status).toBe(409);
+    expect(mongoSchema.generateMongoCmsSchemaFiles).not.toHaveBeenCalled();
+    expect(stateRepo.writeStateFiles).not.toHaveBeenCalled();
+  });
+
+  it("refreshes schema when collections already exist and refresh is explicit", async () => {
+    const rootConfig = {
+      path: "cms/config.json",
+      content: JSON.stringify({
+        version: 1,
+        name: "Example CMS",
+        schemaGeneration: { skipCollections: ["A"] },
+        collections: ["collections/lessons.json"],
+      }),
+      sha: "config-sha",
+    };
+    const lessonsConfig = {
+      path: "cms/collections/lessons.json",
+      content: JSON.stringify({
+        name: "lessons",
+        label: "Lessons",
+        adapter: "mongodb",
+        writePolicy: "enabled",
+        source: { collection: "lessons", idField: "_id" },
+        operations: {
+          list: true,
+          get: true,
+          search: true,
+          create: true,
+          update: true,
+          delete: true,
+        },
+        fields: [{ name: "_id", type: "id" }],
+        filters: [],
+      }),
+      sha: "lessons-sha",
+    };
+    stateRepo.readStateText.mockImplementation(async (...args: unknown[]) => {
+      const path = args[3];
+      if (path === "cms/config.json") return rootConfig;
+      if (path === "cms/collections/lessons.json") return lessonsConfig;
+      return null;
+    });
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      defaultAdapter: "mongodb",
+      writePolicy: "enabled",
+      collections: [{ name: "lessons" }],
+    } as CmsConfigState);
+
+    const res = await schemaPOST(
+      jsonRequest("https://dash.test/api/kody/cms/schema", "POST", {
+        adapter: "mongodb",
+        refresh: true,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mongoSchema.generateMongoCmsSchemaFiles).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skipCollections: ["A"],
+      }),
+    );
+    expect(stateRepo.writeStateFiles).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "A-Guy-educ",
+        repo: "A-Guy-Web",
+        message: "chore(cms): update CMS schema",
+      }),
+    );
+    const write = stateRepo.writeStateFiles.mock.calls[0][0] as {
+      files: Array<{ path: string; content: string }>;
+    };
+    const rootFile = write.files.find(
+      (file: { path: string }) => file.path === "cms/config.json",
+    );
+    expect(JSON.parse(rootFile!.content).schemaGeneration).toEqual({
+      skipCollections: ["A"],
+    });
+    await expect(res.json()).resolves.toMatchObject({
+      generated: { collections: 1, refreshed: true },
+      cms: { configured: true, collections: [{ name: "lessons" }] },
+    });
+  });
+
+  it("creates a CMS document through collection route", async () => {
+    const res = await collectionPOST(
+      jsonRequest("https://dash.test/api/kody/cms/lessons", "POST", {
+        title: "Created",
+      }),
+      { params: Promise.resolve({ collection: "lessons" }) },
+    );
+
+    expect(res.status).toBe(201);
+    expect(auth.verifyActorLogin).toHaveBeenCalledWith(
+      expect.anything(),
+      undefined,
+    );
+    expect(service.createCmsDocument).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "A-Guy-educ",
+      "A-Guy-Web",
+      "lessons",
+      { title: "Created" },
+    );
+    await expect(res.json()).resolves.toMatchObject({
+      document: { _id: "new-id", title: "Created" },
+    });
+  });
+
+  it("updates a CMS document through document route", async () => {
+    const res = await documentPATCH(
+      jsonRequest("https://dash.test/api/kody/cms/lessons/1", "PATCH", {
+        title: "Updated",
+      }),
+      { params: Promise.resolve({ collection: "lessons", id: "1" }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(service.updateCmsDocument).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "A-Guy-educ",
+      "A-Guy-Web",
+      "lessons",
+      "1",
+      { title: "Updated" },
+    );
+    await expect(res.json()).resolves.toMatchObject({
+      document: { _id: "1", title: "Updated" },
+    });
+  });
+
+  it("deletes a CMS document through document route", async () => {
+    const res = await documentDELETE(
+      request("https://dash.test/api/kody/cms/lessons/1"),
+      { params: Promise.resolve({ collection: "lessons", id: "1" }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(service.deleteCmsDocument).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "A-Guy-educ",
+      "A-Guy-Web",
+      "lessons",
+      "1",
+    );
+    await expect(res.json()).resolves.toMatchObject({ deleted: true });
+  });
+
+  it("returns cms_not_configured from the collection route", async () => {
+    service.listCmsDocuments.mockImplementationOnce(async () => {
+      throw new CmsConfigError(["CMS is not configured for this repo"], {
+        code: "cms_not_configured",
+        status: 404,
+      });
+    });
+
+    const res = await collectionGET(request(), {
+      params: Promise.resolve({ collection: "lessons" }),
+    });
+
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "cms_not_configured",
+      message: "CMS is not configured for this repo",
+    });
+  });
+
+  it("returns cms_not_configured from the document route", async () => {
+    service.getCmsDocument.mockImplementationOnce(async () => {
+      throw new CmsConfigError(["CMS is not configured for this repo"], {
+        code: "cms_not_configured",
+        status: 404,
+      });
+    });
+
+    const res = await documentGET(request(), {
+      params: Promise.resolve({ collection: "lessons", id: "1" }),
+    });
+
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "cms_not_configured",
+      message: "CMS is not configured for this repo",
+    });
+  });
+
+  it("normalizes dashboard content-entry URLs before direct document get calls", async () => {
+    service.getCmsDocument.mockResolvedValueOnce({
+      _id: "6a408b5d4a2dd57df6b116ea",
+      title: "Old course",
+    });
+
+    const id =
+      "https://dashboard.example.test/content/entries/courses/6a408b5d4a2dd57df6b116ea/edit?collectionSearch=course";
+    const res = await documentGET(request(), {
+      params: Promise.resolve({ collection: "courses", id }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service.getCmsDocument).toHaveBeenCalledWith(
+      expect.any(NextRequest),
+      expect.anything(),
+      "A-Guy-educ",
+      "A-Guy-Web",
+      "courses",
+      "6a408b5d4a2dd57df6b116ea",
+    );
+  });
+
+  it("lists schema-generated CMS MCP tools", async () => {
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      writePolicy: "enabled",
+      actorRole: "admin",
+      permissions: {},
+      collections: [
+        {
+          name: "lessons",
+          label: "Lessons",
+          adapter: "mongodb",
+          mcpName: "lessons",
+          searchFields: ["title"],
+          writePolicy: "enabled",
+          permissions: {},
+          source: { collection: "lessons", idField: "_id" },
+          operations: {
+            list: true,
+            get: true,
+            search: true,
+            create: true,
+            update: true,
+            delete: true,
+          },
+          defaultSort: [],
+          fields: [
+            { name: "_id", type: "id", readOnly: true },
+            { name: "title", type: "text", required: true },
+          ],
+          filters: [],
+        },
+      ],
+    });
+
+    const res = await mcpPOST(
+      jsonRequest("https://dash.test/api/kody/cms/mcp", "POST", {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        tools: [
+          { name: "cms_list_collections" },
+          { name: "cms_list_lessons" },
+          { name: "cms_get_lessons" },
+          { name: "cms_create_lessons" },
+          { name: "cms_update_lessons" },
+          { name: "cms_delete_lessons" },
+        ],
+      },
+    });
+  });
+
+  it("rejects CMS MCP delete calls when delete is disabled", async () => {
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      writePolicy: "enabled",
+      actorRole: "admin",
+      permissions: {},
+      collections: [
+        {
+          name: "lessons",
+          label: "Lessons",
+          adapter: "mongodb",
+          mcpName: "lessons",
+          searchFields: ["title"],
+          writePolicy: "enabled",
+          permissions: {},
+          source: { collection: "lessons", idField: "_id" },
+          operations: {
+            list: true,
+            get: true,
+            search: true,
+            create: true,
+            update: true,
+            delete: false,
+          },
+          defaultSort: [],
+          fields: [
+            { name: "_id", type: "id", readOnly: true },
+            { name: "title", type: "text", required: true },
+          ],
+          filters: [],
+        },
+      ],
+    });
+
+    const res = await mcpPOST(
+      jsonRequest("https://dash.test/api/kody/cms/mcp", "POST", {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "cms_delete_lessons",
+          arguments: { id: "1" },
+        },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      error: {
+        code: -32000,
+        message: "unknown CMS MCP tool: cms_delete_lessons",
+      },
+    });
+    expect(service.deleteCmsDocument).not.toHaveBeenCalled();
+  });
+
+  it("supports CMS MCP streamable HTTP lifecycle requests", async () => {
+    const getRes = await mcpGET(request("https://dash.test/api/kody/cms/mcp"));
+    expect(getRes.status).toBe(200);
+    expect(getRes.headers.get("content-type")).toContain("text/event-stream");
+
+    const notifyRes = await mcpPOST(
+      jsonRequest("https://dash.test/api/kody/cms/mcp", "POST", {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      }),
+    );
+    expect(notifyRes.status).toBe(202);
+
+    const deleteRes = await mcpDELETE(
+      request("https://dash.test/api/kody/cms/mcp"),
+    );
+    expect(deleteRes.status).toBe(202);
+  });
+
+  it("returns structured content from CMS MCP tool calls", async () => {
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      writePolicy: "enabled",
+      actorRole: "admin",
+      permissions: {},
+      collections: [
+        {
+          name: "lessons",
+          label: "Lessons",
+          adapter: "mongodb",
+          mcpName: "lessons",
+          searchFields: ["title"],
+          writePolicy: "enabled",
+          permissions: {},
+          source: { collection: "lessons", idField: "_id" },
+          operations: {
+            list: true,
+            get: true,
+            search: true,
+            create: true,
+            update: true,
+            delete: true,
+          },
+          defaultSort: [],
+          fields: [
+            { name: "_id", type: "id", readOnly: true },
+            { name: "title", type: "text", required: true },
+          ],
+          filters: [],
+        },
+      ],
+    });
+    (
+      service.listCmsDocuments as unknown as {
+        mockImplementationOnce: (
+          implementation: () => Promise<{
+            docs: Array<Record<string, unknown>>;
+            total: number;
+            limit: number;
+            offset: number;
+          }>,
+        ) => void;
+      }
+    ).mockImplementationOnce(async () => ({
+      docs: [{ _id: "1", title: "Intro" }],
+      total: 1,
+      limit: 10,
+      offset: 0,
+    }));
+
+    const res = await mcpPOST(
+      jsonRequest("https://dash.test/api/kody/cms/mcp", "POST", {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "cms_list_lessons",
+          arguments: { q: "intro", limit: 10 },
+        },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 2,
+      result: {
+        structuredContent: {
+          collection: "lessons",
+          idField: "_id",
+          docs: [{ _id: "1", title: "Intro", cmsDocumentId: "1" }],
+          total: 1,
+          limit: 10,
+          offset: 0,
+        },
+        content: [{ type: "text" }],
+      },
+    });
+    expect(service.listCmsDocuments).toHaveBeenCalledWith(
+      expect.any(NextRequest),
+      expect.anything(),
+      "A-Guy-educ",
+      "A-Guy-Web",
+      "lessons",
+      expect.objectContaining({
+        search: { query: "intro" },
+        limit: 10,
+      }),
+    );
+  });
+
+  it("normalizes CMS MCP document ids before get calls", async () => {
+    service.listCmsCollections.mockResolvedValueOnce({
+      configured: true,
+      version: 1,
+      name: "Example CMS",
+      environment: "default",
+      writePolicy: "enabled",
+      actorRole: "admin",
+      permissions: {},
+      collections: [
+        {
+          name: "courses",
+          label: "Courses",
+          adapter: "mongodb",
+          mcpName: "courses",
+          searchFields: ["title"],
+          writePolicy: "enabled",
+          permissions: {},
+          source: { collection: "courses", idField: "_id" },
+          operations: {
+            list: true,
+            get: true,
+            search: true,
+            create: true,
+            update: true,
+            delete: true,
+          },
+          defaultSort: [],
+          fields: [
+            { name: "_id", type: "id", readOnly: true },
+            { name: "title", type: "text", required: true },
+          ],
+          filters: [],
+        },
+      ],
+    });
+    service.getCmsDocument.mockResolvedValueOnce({ _id: "1", title: "Intro" });
+
+    const res = await mcpPOST(
+      jsonRequest("https://dash.test/api/kody/cms/mcp", "POST", {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "cms_get_courses",
+          arguments: {
+            id: "`6a408b5d4a2dd57df6b116ea/edit?collectionSearch=course`",
+          },
+        },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        structuredContent: {
+          document: { _id: "1", title: "Intro", cmsDocumentId: "1" },
+        },
+      },
+    });
+    expect(service.getCmsDocument).toHaveBeenCalledWith(
+      expect.any(NextRequest),
+      expect.anything(),
+      "A-Guy-educ",
+      "A-Guy-Web",
+      "courses",
+      "6a408b5d4a2dd57df6b116ea",
+    );
+  });
+});

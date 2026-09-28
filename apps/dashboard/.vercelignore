@@ -1,0 +1,9 @@
+# Never upload local environment files.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Keep non-secret templates available to builds.
+!.env.example
+!**/.env.example

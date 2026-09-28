@@ -1,0 +1,17 @@
+{
+  "name": "kody-chat-external-consumer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild app.jsx --bundle --format=esm --outfile=public/app.js"
+  },
+  "dependencies": {
+    "@kody-ade/kody-chat": "file:./kody-chat.tgz",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.59.1",
+    "esbuild": "0.25.12"
+  }
+}

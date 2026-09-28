@@ -1,0 +1,28 @@
+{
+  "name": "@kody-ade/agency-domain",
+  "version": "0.5.1",
+  "license": "MIT",
+  "description": "Pure AI Agency domain model with no infrastructure dependencies.",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "pnpm build",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "typescript": "5.9.3",
+    "vitest": "4.0.16"
+  }
+}

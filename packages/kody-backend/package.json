@@ -1,0 +1,43 @@
+{
+  "name": "@kody-ade/backend",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Kody Convex backend — schema, functions, and import/export tooling. Deployable independently; the dashboard connects via CONVEX_URL when migration happens.",
+  "exports": {
+    "./client": "./src/client.ts",
+    "./memory-store": "./src/memory-store.ts",
+    "./escape-keys": "./src/escape-keys.ts",
+    "./table-registry": "./src/table-registry.ts",
+    "./definition-bundle": "./src/definition-bundle.ts",
+    "./api": "./convex/_generated/api.js"
+  },
+  "scripts": {
+    "dev": "convex dev",
+    "deploy": "convex deploy && vitest run --project smoke",
+    "deploy:prod": "convex deploy --yes && vitest run --project smoke",
+    "codegen": "convex codegen",
+    "test:smoke": "vitest run --project smoke",
+    "import:convex": "tsx scripts/import-convex.ts",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@convex-dev/better-auth": "0.12.5",
+    "@kody-ade/agency-domain": "workspace:*",
+    "@kody-ade/memory": "workspace:*",
+    "better-auth": "1.6.11",
+    "convex": "^1.44.0"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@types/node": "^22.5.4",
+    "@vitest/coverage-v8": "4.0.16",
+    "convex-test": "^0.0.54",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.16"
+  },
+  "type": "module"
+}

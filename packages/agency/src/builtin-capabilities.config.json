@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "capabilities": [
+    {
+      "slug": "assess-architecture",
+      "instructions": "# Architecture assessment\n\nWork read-only and judge only the system's architecture and domain design using current repository evidence.\n\nTrace the main runtime paths, component and package boundaries, dependency direction, data ownership, public interfaces, and domain models. Check for clean separation of concerns, single responsibility, cohesive modules, simple models, duplicated ownership, circular dependencies, hidden coupling, god components, and abstractions that add complexity without solving a current need. Compare the design with the project's stated size and expectations; do not reward complexity merely because it could support hypothetical scale.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-code-quality",
+      "instructions": "# Code quality assessment\n\nWork read-only and judge only implementation quality and maintainability using current repository evidence.\n\nInspect representative high-change and high-risk areas as well as shared foundations. Evaluate readability, consistency, naming, complexity, duplication, error handling, type safety, validation, dead code, generated-code boundaries, module size, and ease of safe change. Look for repeated workarounds and local conventions that disagree with the rest of the system. Do not treat style preferences as defects unless they increase real maintenance risk.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-security",
+      "instructions": "# Security assessment\n\nWork read-only and judge only security and dependency risk using current repository evidence.\n\nTrace trust boundaries, authentication, authorization, tenant isolation, secret handling, external inputs, sensitive data, write operations, dependency exposure, and security automation. Check whether protections are enforced at authoritative boundaries rather than only in the UI. Distinguish exploitable evidence from theoretical concerns, never expose secret values, and do not claim a vulnerability without a supported attack path.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-test-reliability",
+      "instructions": "# Test and reliability assessment\n\nWork read-only and judge only test strength and failure resilience using current repository evidence.\n\nMap critical runtime paths to unit, integration, end-to-end, contract, and deployment checks. Inspect test quality, meaningful assertions, isolation, flakiness controls, fixtures, failure-path coverage, recovery behavior, and whether CI runs the tests that matter. Treat coverage numbers as supporting evidence, not proof of safety. Identify critical behavior that has no trustworthy protection.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-delivery-system",
+      "instructions": "# Delivery system assessment\n\nWork read-only and judge only the path from a code change to a safe release using current repository evidence.\n\nTrace branch protection, pull-request checks, build and packaging steps, migrations, artifact integrity, environments, deployment gates, rollback paths, release automation, and ownership of failures. Inspect relevant GitHub Actions history when available to measure recurring failures, duration, and manual bottlenecks. Separate configured safeguards from safeguards proven to run successfully.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-operational-readiness",
+      "instructions": "# Operational readiness assessment\n\nWork read-only and judge only production operability using current repository evidence.\n\nTrace health checks, logs, metrics, traces, alerts, error reporting, runbooks, backups, restore proof, incident handling, service ownership, configuration safety, capacity signals, and failure recovery. Check whether operators can detect, diagnose, contain, and recover from likely failures. Do not assume a configured integration is monitored or useful without evidence of the real signal path.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-scalability",
+      "instructions": "# Scalability and performance assessment\n\nWork read-only and judge only whether the system can meet its stated growth expectations using current repository evidence.\n\nTrace expensive request paths, data access patterns, concurrency controls, queues, caches, rate limits, external service limits, large-repository behavior, resource bounds, and known performance tests. Relate every concern to current load or explicit expected growth. Separate measured bottlenecks from plausible risks, and reject speculative scaling work that would make the system harder to maintain without a demonstrated need.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-repository-history",
+      "instructions": "# Repository history assessment\n\nWork read-only and judge only maintenance signals visible in current repository evidence and GitHub history.\n\nAnalyze contributors, commit frequency, change concentration, review participation, file ownership concentration, bus-factor signals, recurring reverts, long-lived work, hotspots, release cadence, and unattended dependencies or failures. Use time windows and repository age so raw totals are not misleading. Do not equate commit count with productivity, experience, or code quality. Treat identity aliases, bots, squash merges, and missing history as explicit limitations.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-team-capacity",
+      "instructions": "# Team capacity assessment\n\nWork read-only and judge only whether the available team can sustainably maintain the system using current repository evidence plus supplied team context.\n\nCompare project size, complexity, criticality, support load, technology breadth, ownership concentration, and expected growth with team size, relevant experience, system knowledge, and real maintenance time available. Estimate the expected team or Kody support needed for a properly maintainable system and explain the assumptions behind the estimate. Identify knowledge gaps and single-owner risks. Do not infer experience from Git history alone, and mark missing human context as unknown rather than guessing.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    },
+    {
+      "slug": "assess-continuous-product-qa",
+      "instructions": "# Continuous product QA assessment\n\nWork read-only and judge only whether the product is protected by trustworthy user-level QA using current repository evidence.\n\nMap the critical user journeys and inspect the real browser-testing, preview, authentication, accessibility, responsive-state, error-state, evidence-capture, bug-reporting, scheduling, retry, and repair paths. Distinguish predefined automated tests from exploratory browser QA that behaves like a user. Verify separately whether Kody can run a Quality journey, perform a free-form browser QA pass, run continuously without a person, create a severity-ranked bug, implement a fix, validate the fix, and request human approval. A configured command, workflow, or schedule is not proof that it succeeds around the clock. Identify journeys and environments that remain unprotected.\n\nReturn verified facts with exact sources, prioritized risks with impact and confidence, practical recommendations, and unknowns. Clearly separate evidence from inference. Score only this track from 0 to 100.",
+      "tools": []
+    }
+  ]
+}

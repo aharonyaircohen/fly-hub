@@ -1,0 +1,150 @@
+/**
+ * @fileType component
+ * @domain kody
+ * @pattern report-issue-dialog
+ * @ai-summary Dialog for QA to flag unresolved issues. Adds kody:needs-fix label and posts a 🛑 QA: comment.
+ */
+"use client";
+
+import { useState } from "react";
+import { Button } from "@kody-ade/base/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@kody-ade/base/ui/dialog";
+import { AlertTriangle, Loader2, Eye, Edit } from "lucide-react";
+import { cn } from "@kody-ade/base/utils/ui";
+import { rtlAwareMarkdownClassName } from "../text-direction";
+import { MarkdownPreview } from "./MarkdownPreview";
+
+interface ReportIssueDialogProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSubmit: (notes: string) => Promise<void>;
+  issueNumber: number;
+}
+
+export function ReportIssueDialog({
+  isOpen,
+  onClose,
+  onSubmit,
+  issueNumber,
+}: ReportIssueDialogProps) {
+  const [notes, setNotes] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!notes.trim()) return;
+    setSubmitting(true);
+    try {
+      await onSubmit(notes.trim());
+      setNotes("");
+      setShowPreview(false);
+      onClose();
+    } catch {
+      // Error handled by caller
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-400" />
+            Report Issue on #{issueNumber}
+          </DialogTitle>
+          <DialogDescription>
+            Document unresolved problems found during QA. Adds the{" "}
+            <code className="text-red-400">kody:needs-fix</code> label and pins
+            your notes on the task.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {/* Editor / Preview toggle */}
+          <div className="flex items-center gap-1 border-b border-zinc-800 pb-2">
+            <Button
+              size="clear"
+              variant="ghost"
+              onClick={() => setShowPreview(false)}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded text-body-xs font-medium transition-colors ${
+                !showPreview
+                  ? "bg-zinc-800 text-white hover:bg-zinc-800 hover:text-white"
+                  : "text-zinc-500 hover:bg-transparent hover:text-zinc-300"
+              }`}
+            >
+              <Edit className="w-4 h-4" /> Write
+            </Button>
+            <Button
+              size="clear"
+              variant="ghost"
+              onClick={() => setShowPreview(true)}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded text-body-xs font-medium transition-colors ${
+                showPreview
+                  ? "bg-zinc-800 text-white hover:bg-zinc-800 hover:text-white"
+                  : "text-zinc-500 hover:bg-transparent hover:text-zinc-300"
+              }`}
+            >
+              <Eye className="w-4 h-4" /> Preview
+            </Button>
+          </div>
+
+          {!showPreview ? (
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="What's broken or unresolved?&#10;&#10;e.g., Header overlaps the nav on mobile widths. Loading spinner never disappears after submit."
+              dir="auto"
+              className="w-full h-48 px-3.5 py-3 text-code-md bg-zinc-900 border border-zinc-800 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-red-500/50 placeholder:text-zinc-600 font-mono text-start"
+              autoFocus
+            />
+          ) : (
+            <div className="min-h-[192px] px-4 py-3 bg-zinc-900 border border-zinc-800 rounded-lg overflow-y-auto">
+              {notes.trim() ? (
+                <MarkdownPreview
+                  content={notes}
+                  dir="auto"
+                  className={cn("text-start", rtlAwareMarkdownClassName)}
+                />
+              ) : (
+                <p className="text-zinc-600 text-body-sm italic">
+                  Nothing to preview
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 mt-2">
+          <Button variant="outline" onClick={onClose} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleSubmit}
+            disabled={!notes.trim() || submitting}
+            className="bg-red-600 hover:bg-red-700 text-white"
+          >
+            {submitting ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Reporting...
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="w-4 h-4 mr-2" />
+                Report Issue
+              </>
+            )}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}

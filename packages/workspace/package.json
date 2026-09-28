@@ -1,0 +1,50 @@
+{
+  "name": "@kody-ade/workspace",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Kody workspace layer — Convex-backed content features (commands, context, instructions, brands, memory, todos): file stores, API route handlers, chat tools. Consumed as TS source.",
+  "exports": {
+    "./commands": "./src/commands/index.ts",
+    "./commands/*": "./src/commands/*.ts",
+    "./context": "./src/context/index.ts",
+    "./context/*": "./src/context/*.ts",
+    "./guidance/*": "./src/guidance/*.ts",
+    "./brands": "./src/brands/index.ts",
+    "./brands/*": "./src/brands/*.ts",
+    "./instructions": "./src/instructions/index.ts",
+    "./instructions/*": "./src/instructions/*.ts",
+    "./memory": "./src/memory/index.ts",
+    "./memory/*": "./src/memory/*.ts",
+    "./todos": "./src/todos/index.ts",
+    "./todos/*": "./src/todos/*.ts",
+    "./tools/*": "./src/tools/*.ts",
+    "./routes/*": "./src/routes/*.ts",
+    "./github": "./src/github.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "@kody-ade/agency-domain": "workspace:*",
+    "@kody-ade/backend": "workspace:*",
+    "@kody-ade/base": "workspace:*",
+    "@kody-ade/memory": "workspace:*",
+    "@octokit/rest": "^22.0.1",
+    "ai": "^6.0.97",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "convex": "^1.44.0",
+    "next": "16.2.9",
+    "typescript": "5.9.3",
+    "vitest": "^4.0.16"
+  },
+  "peerDependencies": {
+    "next": "16.2.9",
+    "react": "19.2.7"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "name": "@kody-ade/terminal",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Kody terminal layer — bridge protocol/exec client, session tokens, checkpoints, session connect, local chat session, API route handlers. Lower layer: brain depends on terminal, never the reverse (remote runtime access is host-injected via remote-runtime-connector). Consumed as TS source.",
+  "exports": {
+    "./*": "./src/*.ts",
+    "./routes/*": "./src/routes/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "@kody-ade/base": "workspace:*",
+    "@octokit/rest": "^22.0.1",
+    "zod": "^4.3.5"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "^4.0.16",
+    "@types/react": "^19.2.17",
+    "next": "16.2.9"
+  },
+  "peerDependencies": {
+    "react": "19.2.7",
+    "next": "16.2.9"
+  }
+}

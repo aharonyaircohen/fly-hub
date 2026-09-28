@@ -1,0 +1,318 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+const root = resolve(__dirname, "../..");
+
+function readRepoFile(path: string): string {
+  return readFileSync(resolve(root, path), "utf8");
+}
+
+describe("CMS UI routes", () => {
+  it("has a first-class edit route wired to the edit manager", () => {
+    const path =
+      "app/(chat-rail)/content/entries/[collection]/[id]/edit/page.tsx";
+
+    expect(existsSync(resolve(root, path))).toBe(true);
+    expect(readRepoFile(path)).toContain("CmsEditManager");
+    expect(
+      readRepoFile("src/dashboard/features/admin/components/CmsManager.tsx"),
+    ).toContain("export function CmsEditManager");
+  });
+
+  it("renders CMS forms with explicit cancel handling", () => {
+    const source = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+
+    expect(source).toContain("onCancel");
+    expect(source).toContain("Cancel");
+  });
+
+  it("offers content config creation from the unconfigured state", () => {
+    const manager = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const client = readRepoFile(
+      "src/dashboard/features/admin/components/cms/client.ts",
+    );
+
+    expect(manager).toContain("UnconfiguredCmsState");
+    expect(manager).toContain("Create content config");
+    expect(manager).toContain("createConfigMutation.mutate");
+    expect(manager).toContain("selectedAdapter");
+    expect(manager).toContain("onAdapterChange");
+    expect(manager).toContain("Content adapter");
+    expect(client).toContain("fetchCmsAdapters");
+    expect(client).toContain("createCmsConfig");
+  });
+
+  it("offers named connections after content is configured", () => {
+    const manager = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const client = readRepoFile(
+      "src/dashboard/features/admin/components/cms/client.ts",
+    );
+    const configPage = "app/(chat-rail)/content/settings/page.tsx";
+
+    expect(existsSync(resolve(root, configPage))).toBe(true);
+    expect(readRepoFile(configPage)).toContain("CmsConfigManager");
+    expect(manager).toContain("export function CmsConfigManager");
+    expect(manager).toContain("Save connection");
+    expect(manager).toContain("CmsAdapterSettingsPanel");
+    expect(manager).toContain("Connection name");
+    expect(manager).toContain("Connection settings");
+    expect(manager).toContain("Add connection");
+    expect(manager).toContain("rootDir");
+    expect(manager).toContain("saveAdapterMutation.mutate");
+    expect(client).toContain("saveCmsAdapter");
+    expect(manager).toContain('aria-label="Database"');
+    expect(manager).toContain("selectedConnection");
+  });
+
+  it("shows and selects each model's connection", () => {
+    const entries = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const models = readRepoFile(
+      "src/dashboard/features/admin/components/ContentModelManager.tsx",
+    );
+
+    expect(entries).toContain("{collection.adapter}");
+    expect(models).toContain('FieldShell label="Connection"');
+    expect(models).toContain("Unknown connection:");
+  });
+
+  it("offers schema generation when CMS has no collections", () => {
+    const manager = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const client = readRepoFile(
+      "src/dashboard/features/admin/components/cms/client.ts",
+    );
+
+    expect(manager).toContain("GenerateSchemaState");
+    expect(manager).toContain("Generate schema");
+    expect(manager).toContain("databaseUriSecret");
+    expect(client).toContain("connectionName");
+    expect(manager).toContain("generateSchemaMutation.mutate");
+    expect(manager).not.toContain("URI secret");
+    expect(manager).not.toContain("Sample size");
+    expect(manager).not.toContain("Skip collections");
+    expect(client).toContain("/api/kody/cms/schema");
+  });
+
+  it("offers schema refresh when CMS already has collections", () => {
+    const manager = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const client = readRepoFile(
+      "src/dashboard/features/admin/components/cms/client.ts",
+    );
+
+    expect(manager).toContain("CmsConfigManager");
+    expect(manager).toContain("Update schema");
+    expect(manager).toContain("refresh: true");
+    expect(client).toContain("refresh?: boolean");
+  });
+
+  it("keeps configured CMS actions out of the content entries header", () => {
+    const source = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const start = source.indexOf("function CmsHeaderActions");
+    const end = source.indexOf("type CmsWriteRolePreset");
+    const header = source.slice(start, end);
+
+    expect(header).toContain("Refresh content");
+    expect(header).not.toContain("CMS adapter settings");
+    expect(header).not.toContain("CMS permissions");
+    expect(header).not.toContain("CMS MCP");
+    expect(header).not.toContain("Update CMS schema");
+  });
+
+  it("keeps old content URLs as redirects", () => {
+    const nextConfig = readRepoFile("next.config.mjs");
+
+    expect(nextConfig).toContain('source: "/cms/:path*"');
+    expect(nextConfig).toContain('destination: "/content/entries/:path*"');
+    expect(readRepoFile("app/(chat-rail)/cms/page.tsx")).toContain(
+      'redirect("/content/entries")',
+    );
+    expect(readRepoFile("app/(chat-rail)/content-model/page.tsx")).toContain(
+      'redirect("/content/models")',
+    );
+    expect(readRepoFile("app/(chat-rail)/cms-config/page.tsx")).toContain(
+      'redirect("/content/settings")',
+    );
+  });
+
+  it("keeps CMS table filters mounted while documents load", () => {
+    const source = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const start = source.indexOf("function CollectionWorkspace");
+    const end = source.indexOf("function GenerateSchemaState");
+    const workspace = source.slice(start, end);
+
+    expect(workspace).toContain("loading={loading}");
+    expect(workspace).not.toContain("{loading ? (");
+    expect(source).toContain(") : documents.length === 0 ? (");
+    expect(workspace).toContain("<span>{adapterLabel}</span>");
+    expect(source).toContain("No items returned from ${adapterLabel}");
+    expect(source).toContain("Try a different filter.");
+  });
+
+  it("persists content entries list state in the URL", () => {
+    const source = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const start = source.indexOf("function CmsListPage");
+    const end = source.indexOf("function CmsItemPage");
+    const listPage = source.slice(start, end);
+
+    expect(source).toContain("parseCmsListState");
+    expect(source).toContain("serializeCmsListState");
+    expect(listPage).toContain("useSearchParams");
+    expect(listPage).toContain("router.replace(nextPath, { scroll: false })");
+    expect(listPage).toContain("setFilterValues(parsedListState.filterValues)");
+    expect(listPage).toContain("setSort(parsedListState.sort)");
+    expect(listPage).toContain("setOffset(parsedListState.offset)");
+    expect(listPage).toContain("setPageSizeOverride(parsedListState.pageSize)");
+  });
+
+  it("offers page-size selection and numbered page jumps in content entries", () => {
+    const source = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const listPage = source.slice(
+      source.indexOf("function CmsListPage"),
+      source.indexOf("function CmsItemPage"),
+    );
+    const pager = source.slice(
+      source.indexOf("function DocumentPager"),
+      source.indexOf("function ContentDetailPage"),
+    );
+
+    expect(listPage).toContain("pageSizeOverride");
+    expect(listPage).toContain("onPageSizeChange");
+    expect(pager).toContain("Items per page");
+    expect(pager).toContain("buildCmsPageNumbers");
+    expect(pager).toContain("Page ${page}");
+  });
+
+  it("keeps CMS form actions visible while form fields scroll", () => {
+    const source = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const detailStart = source.indexOf("function ContentDetailPage");
+    const detailEnd = source.indexOf("function ContentFormPage");
+    const detail = source.slice(detailStart, detailEnd);
+    const start = source.indexOf("function ContentFormPage");
+    const end = source.indexOf("function FormFieldControl");
+    const form = source.slice(start, end);
+
+    expect(detail).toContain("flex min-h-0 flex-1 flex-col overflow-hidden");
+    expect(detail).toContain("data-[state=active]:flex");
+    expect(form).toContain("overflow-hidden");
+    expect(form).toContain("overflow-y-auto");
+    expect(form).toContain("border-t border-border");
+    expect(form).toContain("Save changes");
+    expect(form).toContain("Create");
+  });
+
+  it("contains outer page scrolling in CMS without fixing the dashboard shell", () => {
+    const manager = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const shell = readRepoFile(
+      "src/dashboard/lib/components/ChatRailShell.tsx",
+    );
+
+    expect(manager).toContain("useCmsViewportGuard");
+    expect(manager).toContain('window.history.scrollRestoration = "manual"');
+    expect(manager).toContain('htmlStyle.overflow = "hidden"');
+    expect(shell).not.toContain('bodyStyle.position = "fixed"');
+  });
+
+  it("offers content permissions management from content settings", () => {
+    const manager = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+    const client = readRepoFile(
+      "src/dashboard/features/admin/components/cms/client.ts",
+    );
+    const writeActions = manager.slice(
+      manager.indexOf("Collection write actions"),
+      manager.indexOf("Collection overrides"),
+    );
+    const writeActionHeader = writeActions.slice(
+      writeActions.indexOf("bg-muted/50"),
+      writeActions.indexOf("{config.collections.map"),
+    );
+    const writeActionRows = writeActions.slice(
+      writeActions.indexOf("{config.collections.map"),
+    );
+
+    expect(manager).toContain("CmsConfigManager");
+    expect(manager).toContain("Content permissions");
+    expect(manager).toContain("Default policy");
+    expect(manager).toContain("Collection write actions");
+    expect(writeActionHeader).toContain("updateOperationColumn");
+    expect(writeActionHeader).toContain("checked={allEnabled}");
+    expect(writeActionHeader).toContain(
+      "all ${item.label.toLowerCase()} actions",
+    );
+    expect(writeActionRows).not.toContain("updateOperationColumn");
+    expect(manager).not.toContain("updateCollectionOperations");
+    expect(manager).toContain("Collection overrides");
+    expect(manager).toContain("Clear overrides");
+    expect(manager).toContain("Save permissions");
+    expect(manager).toContain("connectionName");
+    expect(manager).toContain("selectedCollections");
+    expect(manager).toContain("buildCollectionOperationFlags");
+    expect(client).toContain("saveCmsPermissions");
+    expect(client).toContain("operations?: Pick");
+    expect(client).toContain('method: "PATCH"');
+  });
+
+  it("offers MCP connection details from content settings", () => {
+    const manager = readRepoFile(
+      "src/dashboard/features/admin/components/CmsManager.tsx",
+    );
+
+    expect(manager).toContain("CmsConfigManager");
+    expect(manager).toContain("MCP Tools");
+    expect(manager).toContain("/api/kody/cms/mcp");
+    expect(manager).toContain("x-kody-token");
+    expect(manager).toContain("x-kody-owner");
+    expect(manager).toContain("x-kody-repo");
+    expect(manager).toContain("generateCmsMcpTools");
+  });
+
+  it("offers resource deletion from the Content Model page", () => {
+    const manager = readRepoFile(
+      "src/dashboard/features/admin/components/ContentModelManager.tsx",
+    );
+    const client = readRepoFile(
+      "src/dashboard/features/admin/components/cms/client.ts",
+    );
+    const resourceSettings = manager.slice(
+      manager.indexOf("function ResourceSettingsBar"),
+      manager.indexOf("function FieldsTable"),
+    );
+    const deleteMutation = manager.slice(
+      manager.indexOf("const deleteMutation"),
+      manager.indexOf("const loading"),
+    );
+
+    expect(manager).toContain("deleteCmsModelResource");
+    expect(resourceSettings).toContain("Delete resource");
+    expect(deleteMutation).not.toContain("invalidateQueries");
+    expect(manager).toContain("ConfirmDialog");
+    expect(client).toContain("deleteCmsModelResource");
+    expect(client).toContain('method: "DELETE"');
+  });
+});

@@ -1,0 +1,43 @@
+{
+  "name": "@kody-ade/agency",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Private Kody agency layer — agents, capabilities, workflows, loops, runs, persistence, and route handlers.",
+  "exports": {
+    "./agency-approvals": "./src/agency-approvals.ts",
+    "./agency-runs": "./src/agency-runs.ts",
+    "./pipeline-run-approval": "./src/pipeline-run-approval.ts",
+    "./capabilities": "./src/capabilities/index.ts",
+    "./capabilities/*": "./src/capabilities/*.ts",
+    "./cto/*": "./src/cto/*.ts",
+    "./routes/*": "./src/routes/*.ts",
+    "./github": "./src/github.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kody-ade/agency-domain": "workspace:*",
+    "@kody-ade/backend": "workspace:*",
+    "@kody-ade/base": "workspace:*",
+    "@kody-ade/engine-contracts": "workspace:*",
+    "@octokit/rest": "^22.0.1",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@vitest/coverage-v8": "4.0.16",
+    "convex": "^1.44.0",
+    "next": "16.2.9",
+    "typescript": "5.9.3",
+    "vitest": "4.0.16"
+  },
+  "peerDependencies": {
+    "next": "16.2.9",
+    "react": "19.2.7"
+  }
+}

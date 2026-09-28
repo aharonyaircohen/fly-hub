@@ -1,0 +1,186 @@
+/**
+ * @fileType api-endpoint
+ * @domain kody
+ * @pattern context-api
+ * @ai-summary Context API — GET lists context entries
+ *   (`context/<slug>.md` in the Convex), POST creates a new one. Entries owned by the
+ *   built-in `kody` agent are injected into the kody-direct chat system
+ *   prompt so the agent knows what the company is and does.
+ */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import {
+  verifyRepoReadAccess,
+  verifyRepoWriteAccess,
+  verifyActorLogin,
+  getUserOctokit,
+  getRequestAuth,
+} from "@kody-ade/base/auth";
+import { setGitHubContext, clearGitHubContext } from "../github";
+import {
+  listContextFiles,
+  readContextFile,
+  writeContextFile,
+  isValidSlug,
+} from "../context/files";
+import { KODY_CHAT_AGENT } from "../context/frontmatter";
+import { normalizeSlug } from "@kody-ade/base/slug";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+const NO_STORE_HEADERS = { "Cache-Control": "no-store, max-age=0" };
+
+/** An agent slug (entry slug shape) or the `*` all-agent wildcard. */
+const AGENT_TOKEN_RE = /^(\*|[a-z0-9][a-z0-9_-]{0,63})$/;
+
+export async function GET(req: NextRequest) {
+  const authResult = await verifyRepoReadAccess(req);
+  if (authResult instanceof NextResponse) return authResult;
+
+  const headerAuth = getRequestAuth(req);
+  if (headerAuth)
+    setGitHubContext(headerAuth.owner, headerAuth.repo, headerAuth.token);
+
+  try {
+    const entries = await listContextFiles();
+    return NextResponse.json({ entries }, { headers: NO_STORE_HEADERS });
+  } catch (error: any) {
+    console.error("[Context] Error listing context:", error);
+    if (error?.status === 401) {
+      return NextResponse.json(
+        { error: "github_token_expired" },
+        { status: 401, headers: NO_STORE_HEADERS },
+      );
+    }
+    if (error?.status === 403 || error?.message?.includes("rate limit")) {
+      return NextResponse.json(
+        { error: "rate_limited", message: "GitHub API rate limit exceeded" },
+        { status: 429, headers: NO_STORE_HEADERS },
+      );
+    }
+    return NextResponse.json(
+      { entries: [], error: error?.message || "Failed to list context" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  } finally {
+    clearGitHubContext();
+  }
+}
+
+const createContextSchema = z.object({
+  slug: z.preprocess(
+    (value) =>
+      typeof value === "string" && value.trim().length === 0
+        ? undefined
+        : value,
+    z.string().max(64).optional(),
+  ),
+  name: z.string().min(1).max(120).optional(),
+  body: z.string().min(1),
+  // May be empty — an unassigned entry owned by no agent.
+  agent: z.array(z.string().regex(AGENT_TOKEN_RE)).default([KODY_CHAT_AGENT]),
+  actorLogin: z.string().optional(),
+});
+
+export async function POST(req: NextRequest) {
+  const authResult = await verifyRepoWriteAccess(req);
+  if (authResult instanceof NextResponse) return authResult;
+
+  const headerAuth = getRequestAuth(req);
+  if (headerAuth)
+    setGitHubContext(headerAuth.owner, headerAuth.repo, headerAuth.token);
+
+  try {
+    const payload = await req.json();
+    const {
+      slug: requestedSlug,
+      name,
+      body,
+      agent,
+      actorLogin,
+    } = createContextSchema.parse(payload);
+    const slugSource = requestedSlug ?? name;
+
+    if (!slugSource) {
+      return NextResponse.json(
+        {
+          error: "validation_error",
+          message: "Context entry name is required.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const slug = normalizeSlug(slugSource, "context");
+
+    if (!isValidSlug(slug)) {
+      return NextResponse.json(
+        {
+          error: "invalid_slug",
+          message:
+            "Context slug must be lowercase letters, digits, dashes, or underscores.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const existing = await readContextFile(slug);
+    if (existing) {
+      return NextResponse.json(
+        {
+          error: "slug_taken",
+          message: `Context entry "${slug}" already exists.`,
+        },
+        { status: 409 },
+      );
+    }
+
+    const actorResult = await verifyActorLogin(req, actorLogin);
+    if (actorResult instanceof NextResponse) return actorResult;
+
+    const userOctokit = await getUserOctokit(req);
+    if (!userOctokit) {
+      return NextResponse.json(
+        {
+          error: "no_user_token",
+          message:
+            "A signed-in GitHub token is required to commit context files.",
+        },
+        { status: 401 },
+      );
+    }
+
+    const entry = await writeContextFile({
+      slug,
+      body,
+      agent,
+    });
+
+    return NextResponse.json({ entry });
+  } catch (error: any) {
+    console.error("[Context] Error creating context entry:", error);
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: "validation_error", details: error.issues },
+        { status: 400 },
+      );
+    }
+    if (error?.status === 401) {
+      return NextResponse.json(
+        { error: "github_token_expired" },
+        { status: 401 },
+      );
+    }
+    return NextResponse.json(
+      {
+        error: "create_failed",
+        message: error?.message ?? "Failed to create context entry",
+      },
+      { status: 500 },
+    );
+  } finally {
+    clearGitHubContext();
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "kody-monorepo",
+  "private": true,
+  "description": "Kody platform monorepo — kody-chat core package plus feature packages and host apps",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @kody-ade/backend --filter kody-dashboard dev",
+    "dev:dashboard": "pnpm --parallel --filter @kody-ade/backend --filter kody-dashboard dev",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm -r test:unit",
+    "build": "pnpm -r build",
+    "release:mcp:production": "node apps/dashboard/scripts/release-mcp-production.mjs",
+    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "node-pty"
+    ]
+  }
+}

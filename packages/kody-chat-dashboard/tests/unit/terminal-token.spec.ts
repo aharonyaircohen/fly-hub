@@ -1,0 +1,127 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  mintTerminalBridgeToken,
+  verifyTerminalBridgeToken,
+} from "@kody-ade/terminal/terminal-token";
+
+const SECRET = "test-master-secret";
+
+describe("terminal bridge token", () => {
+  it("round-trips encrypted launch claims", () => {
+    const token = mintTerminalBridgeToken({
+      owner: "acme",
+      repo: "widgets",
+      app: "kody-runner",
+      machineId: "m-123",
+      privateAddress: "fdaa:74:e7fe:a7b::2",
+      chatSessionId: "chat-1",
+      activityLimitMs: 2 * 60 * 60_000,
+      flyToken: "FlyV1 secret-token",
+      orgSlug: "guy-koren",
+      cols: 132,
+      rows: 40,
+      now: 100,
+      secret: SECRET,
+    });
+
+    expect(token).not.toContain("secret-token");
+    const claims = verifyTerminalBridgeToken(token, {
+      now: 110,
+      secret: SECRET,
+    });
+    expect(claims).toMatchObject({
+      owner: "acme",
+      repo: "widgets",
+      app: "kody-runner",
+      machineId: "m-123",
+      privateAddress: "fdaa:74:e7fe:a7b::2",
+      chatSessionId: "chat-1",
+      activityLimitMs: 2 * 60 * 60_000,
+      flyToken: "FlyV1 secret-token",
+      orgSlug: "guy-koren",
+      cols: 132,
+      rows: 40,
+    });
+  });
+
+  it("round-trips a never-expiring terminal activity limit", () => {
+    const token = mintTerminalBridgeToken({
+      owner: "acme",
+      repo: "widgets",
+      app: "kody-brain-alice",
+      machineId: "brain-1",
+      chatSessionId: "chat-1",
+      activityLimitMs: null,
+      flyToken: "FlyV1 secret-token",
+      now: 100,
+      secret: SECRET,
+    });
+
+    const claims = verifyTerminalBridgeToken(token, {
+      now: 110,
+      secret: SECRET,
+    });
+    expect(claims.activityLimitMs).toBeNull();
+  });
+
+  it("round-trips local exec GHCR claims without a machine target", () => {
+    const token = mintTerminalBridgeToken({
+      owner: "acme",
+      repo: "widgets",
+      app: "kody-brain-alice",
+      localExec: true,
+      flyToken: "FlyV1 secret-token",
+      ghcrToken: "ghcr-secret-token",
+      now: 100,
+      secret: SECRET,
+    });
+
+    expect(token).not.toContain("ghcr-secret-token");
+    const claims = verifyTerminalBridgeToken(token, {
+      now: 110,
+      secret: SECRET,
+    });
+    expect(claims).toMatchObject({
+      app: "kody-brain-alice",
+      localExec: true,
+      flyToken: "FlyV1 secret-token",
+      ghcrToken: "ghcr-secret-token",
+    });
+    expect(claims.machineId).toBeUndefined();
+  });
+
+  it("rejects tampered tokens", () => {
+    const token = mintTerminalBridgeToken({
+      owner: "acme",
+      repo: "widgets",
+      app: "kody-runner",
+      machineId: "m-123",
+      flyToken: "fly-token",
+      now: 100,
+      secret: SECRET,
+    });
+
+    const tampered = `${token.slice(0, -1)}x`;
+    expect(() =>
+      verifyTerminalBridgeToken(tampered, { now: 110, secret: SECRET }),
+    ).toThrow(/signature invalid|payload invalid|malformed/);
+  });
+
+  it("rejects expired tokens", () => {
+    const token = mintTerminalBridgeToken({
+      owner: "acme",
+      repo: "widgets",
+      app: "kody-runner",
+      machineId: "m-123",
+      flyToken: "fly-token",
+      now: 100,
+      ttlSeconds: 5,
+      secret: SECRET,
+    });
+
+    expect(() =>
+      verifyTerminalBridgeToken(token, { now: 106, secret: SECRET }),
+    ).toThrow(/expired/);
+  });
+});

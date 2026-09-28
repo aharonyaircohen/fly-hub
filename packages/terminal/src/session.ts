@@ -1,0 +1,195 @@
+/**
+ * @fileType utility
+ * @domain terminal
+ * @pattern terminal-session-policy
+ *
+ * Pure helpers for deciding which provider machines may expose a browser terminal
+ * and for building the dashboard-managed bridge websocket URL.
+ */
+import type {
+  ServerProviderFeature,
+  ServerProviderInventory,
+  ServerProviderMachineRow,
+} from "@kody-ade/base/infrastructure/server-machine-model";
+
+export type TerminalTargetError =
+  "machine_not_found" | "machine_not_terminal_capable" | "machine_not_running";
+
+export interface TerminalTargetInput {
+  app: string;
+  machineId: string;
+  feature?: ServerProviderFeature;
+}
+
+export interface TerminalTargetResult {
+  ok: true;
+  machine: ServerProviderMachineRow;
+}
+
+export interface TerminalTargetFailure {
+  ok: false;
+  error: TerminalTargetError;
+}
+
+const TERMINAL_FEATURES = new Set<ServerProviderFeature>(["brain"]);
+const LIVE_STATES = new Set(["started", "running"]);
+const STARTABLE_STATES = new Set(["suspended", "stopped"]);
+const TRANSITIONING_STATES = new Set([
+  "created",
+  "pending",
+  "starting",
+  "replacing",
+  "restarting",
+  "stopping",
+  "suspending",
+]);
+
+export function isTerminalFeatureAllowed(
+  feature: ServerProviderFeature,
+): boolean {
+  return TERMINAL_FEATURES.has(feature);
+}
+
+export function isTerminalMachineLive(state: string): boolean {
+  return LIVE_STATES.has(state);
+}
+
+export function isTerminalMachineStartable(state: string): boolean {
+  return STARTABLE_STATES.has(state);
+}
+
+export function isTerminalMachineTransitioning(state: string): boolean {
+  return TRANSITIONING_STATES.has(state);
+}
+
+export function upsertTerminalTargetMachine(
+  inventory: ServerProviderInventory,
+  machine: ServerProviderMachineRow,
+  orgSlug: string,
+): void {
+  inventory.machines = inventory.machines.filter(
+    (item) => item.app !== machine.app || item.machineId !== machine.machineId,
+  );
+  inventory.machines.push({ ...machine, orgSlug: machine.orgSlug ?? orgSlug });
+  inventory.total = inventory.machines.length;
+  inventory.running = inventory.machines.filter((item) =>
+    isTerminalMachineLive(item.state),
+  ).length;
+}
+
+export function findTerminalTargetMachine(
+  inventory: ServerProviderInventory,
+  input: TerminalTargetInput,
+): ServerProviderMachineRow | null {
+  return (
+    inventory.machines.find(
+      (m) => m.app === input.app && m.machineId === input.machineId,
+    ) ?? null
+  );
+}
+
+export function resolveTerminalTargetMachine(
+  inventory: ServerProviderInventory,
+  input: TerminalTargetInput,
+): ServerProviderMachineRow | null {
+  const exact = findTerminalTargetMachine(inventory, input);
+  if (exact) return exact;
+
+  if (input.feature === "brain") {
+    const brainMachines = inventory.machines.filter(
+      (m) => m.feature === "brain",
+    );
+    return brainMachines.length === 1 ? brainMachines[0] : null;
+  }
+
+  const brainMachinesForApp = inventory.machines.filter(
+    (m) => m.app === input.app && m.feature === "brain",
+  );
+  return brainMachinesForApp.length === 1 ? brainMachinesForApp[0] : null;
+}
+
+export function resolveBrainTerminalTargetInput(
+  inventory: ServerProviderInventory,
+  input?: {
+    app?: string;
+    machineId?: string;
+    feature?: ServerProviderFeature;
+  } | null,
+): { app: string; machineId: string; feature: "brain" } | null {
+  if (input?.app && input.machineId) {
+    const target = resolveTerminalTargetMachine(inventory, {
+      app: input.app,
+      machineId: input.machineId,
+      feature: "brain",
+    });
+    if (target?.feature === "brain") {
+      return {
+        app: target.app,
+        machineId: target.machineId,
+        feature: "brain",
+      };
+    }
+  }
+
+  const brainMachines = inventory.machines.filter(
+    (machine) => machine.feature === "brain",
+  );
+  if (brainMachines.length !== 1) return null;
+  return {
+    app: brainMachines[0].app,
+    machineId: brainMachines[0].machineId,
+    feature: "brain",
+  };
+}
+
+export function selectTerminalTarget(
+  inventory: ServerProviderInventory,
+  input: TerminalTargetInput,
+): TerminalTargetResult | TerminalTargetFailure {
+  const machine = resolveTerminalTargetMachine(inventory, input);
+  if (!machine) return { ok: false, error: "machine_not_found" };
+  if (!isTerminalFeatureAllowed(machine.feature)) {
+    return { ok: false, error: "machine_not_terminal_capable" };
+  }
+  if (!isTerminalMachineLive(machine.state)) {
+    return { ok: false, error: "machine_not_running" };
+  }
+  return { ok: true, machine };
+}
+
+export function terminalActivityLimitForTarget(
+  feature: ServerProviderFeature,
+  requested: number | null | undefined,
+): number | null | undefined {
+  return feature === "brain" ? requested : undefined;
+}
+
+export function terminalBridgeSessionIdForTarget(input: {
+  owner: string;
+  repo: string;
+  app: string;
+  machineId: string;
+  feature: ServerProviderFeature;
+  requestedChatSessionId?: string;
+}): string | undefined {
+  if (input.feature !== "brain") return input.requestedChatSessionId;
+  const base = `brain:${input.owner}:${input.repo}:${input.app}:${input.machineId}`;
+  return input.requestedChatSessionId
+    ? `${base}:${input.requestedChatSessionId}`
+    : base;
+}
+
+export function buildTerminalWebSocketUrl(
+  bridgeBase: string,
+  token: string,
+): string {
+  const trimmed = bridgeBase.trim().replace(/\/$/, "");
+  if (!trimmed) throw new Error("terminal bridge URL missing");
+  const url = new URL(
+    trimmed.startsWith("ws://") || trimmed.startsWith("wss://")
+      ? trimmed
+      : trimmed.replace(/^http:/, "ws:").replace(/^https:/, "wss:"),
+  );
+  url.searchParams.set("token", token);
+  return url.toString();
+}

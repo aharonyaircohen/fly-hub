@@ -1,0 +1,30 @@
+{
+  "name": "@kody-ade/memory",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Pure Kody memory domain and application contracts.",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "pnpm build",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "@vitest/coverage-v8": "4.0.16",
+    "typescript": "5.9.3",
+    "vitest": "4.0.16"
+  }
+}

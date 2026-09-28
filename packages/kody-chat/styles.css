@@ -1,0 +1,182 @@
+.kody-chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 24rem;
+  overflow: hidden;
+  color: #171717;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 0.75rem;
+  width: 100%;
+  max-width: 100%;
+  font:
+    400 0.95rem/1.5 system-ui,
+    sans-serif;
+}
+
+.kody-chat__content {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  grid-template-rows: auto 1fr auto;
+}
+
+.kody-chat__header {
+  padding: 0.875rem 1rem;
+  border-bottom: 1px solid #e5e5e5;
+  font-weight: 600;
+}
+
+.kody-chat__sessions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.75rem;
+  overflow-x: hidden;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.kody-chat__sessions label {
+  font-weight: 600;
+}
+
+.kody-chat__sessions input,
+.kody-chat__sessions select,
+.kody-chat__sessions button,
+.kody-chat__notice button {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #d4d4d4;
+  border-radius: 0.45rem;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+}
+
+.kody-chat__sessions input {
+  min-width: 8rem;
+  flex: 1 1 10rem;
+}
+
+.kody-chat__sessions select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.kody-chat__notice {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  color: #991b1b;
+  background: #fef2f2;
+  border-bottom: 1px solid #fecaca;
+}
+
+.kody-chat__messages {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.kody-chat__message {
+  max-width: 80%;
+  padding: 0.625rem 0.75rem;
+  white-space: pre-wrap;
+  border-radius: 0.75rem;
+}
+
+.kody-chat__message--user {
+  align-self: end;
+  color: #fff;
+  background: #171717;
+}
+
+.kody-chat__message--assistant {
+  align-self: start;
+  background: #f5f5f5;
+}
+
+.kody-chat__message[data-status="error"] {
+  color: #991b1b;
+  background: #fef2f2;
+}
+
+.kody-chat__composer {
+  display: grid;
+  min-width: 0;
+  flex: none;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-top: 1px solid #e5e5e5;
+}
+
+.kody-chat__attach {
+  align-self: end;
+  cursor: pointer;
+}
+
+.kody-chat__attach input,
+.kody-chat__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.kody-chat__attachments {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.kody-chat__attachments span {
+  padding: 0.25rem 0.5rem;
+  background: #f5f5f5;
+  border-radius: 999px;
+  font-size: 0.8rem;
+}
+
+.kody-chat__composer textarea {
+  min-width: 0;
+  resize: vertical;
+  padding: 0.625rem;
+  border: 1px solid #d4d4d4;
+  border-radius: 0.5rem;
+  font: inherit;
+}
+
+.kody-chat__composer button {
+  align-self: end;
+  padding: 0.625rem 0.875rem;
+  color: #fff;
+  background: #171717;
+  border: 0;
+  border-radius: 0.5rem;
+  font: inherit;
+}
+
+.kody-chat__composer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+@media (max-width: 40rem) {
+  .kody-chat {
+    border-radius: 0;
+  }
+
+  .kody-chat__message {
+    max-width: 90%;
+  }
+}

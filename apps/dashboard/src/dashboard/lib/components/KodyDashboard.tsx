@@ -1,0 +1,1863 @@
+/**
+ * @fileType component
+ * @domain kody
+ * @pattern kody-dashboard
+ * @ai-summary Main dashboard component with responsive layout — Sheet for mobile controls and task detail
+ */
+"use client";
+
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import type { KodyTask, SortField } from "@kody-ade/base/types";
+import { filterTasksByView, getViewModeCounts, sortTasks } from "../utils";
+import { cn } from "../utils";
+import { TaskList } from "@dashboard/features/tasks/components/TaskList";
+
+import { CreateTaskDialog } from "@dashboard/features/tasks/components/CreateTaskDialog";
+import { EditTaskDialog } from "@dashboard/features/tasks/components/EditTaskDialog";
+import { BugReportDialog } from "./BugReportDialog";
+import { KodyBugReportDialog } from "./KodyBugReportDialog";
+import { KeyboardShortcutsDialog } from "./KeyboardShortcutsDialog";
+import { useChatScope } from "./ChatRailShell";
+import { KodyStatusBanner } from "./KodyStatusBanner";
+import {
+  FilterBar,
+  ViewToggle,
+  DATE_FILTERS,
+  STATUS_FILTERS,
+  type ViewMode,
+} from "./FilterBar";
+import { TaskDetail } from "@dashboard/features/tasks/components/TaskDetail";
+import { PreviewModal } from "@dashboard/features/previews/components/PreviewModal";
+import { Button } from "@kody-ade/base/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@kody-ade/base/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from "@kody-ade/base/ui/sheet";
+import {
+  MessageSquare,
+  Bug,
+  LifeBuoy,
+  RefreshCw,
+  AlertCircle,
+  X as XIcon,
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+} from "lucide-react";
+import { useKodyTasksPage, queryKeys, useDefaultBranchCI } from "../hooks";
+import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
+import { useBrowserNotifications } from "../hooks/useBrowserNotifications";
+import { useNotifications } from "../notifications/NotificationsProvider";
+import { useMediaQuery } from "@dashboard/lib/hooks/useMediaQuery";
+import { useScrollRestoration } from "@dashboard/lib/hooks/useScrollRestoration";
+import {
+  RateLimitError,
+  NoTokenError,
+  SessionExpiredError,
+  tasksApi,
+  kodyApi,
+  redirectToLogin,
+  getStoredAuth,
+} from "../api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { useGitHubIdentity } from "../hooks/useGitHubIdentity";
+import { useAuth } from "../auth-context";
+import { repoPathForNavMatching, repoScopedHref } from "@kody-ade/base/routes";
+import { RepoManager } from "./RepoManager";
+import { KodyHeader } from "./KodyHeader";
+import { HeaderOverflowMenu } from "./HeaderOverflowMenu";
+import { MobileMenu } from "@kody-ade/kody-chat-dashboard/components/MobileMenu";
+import { DASHBOARD_NAV_ITEM } from "./settings-nav";
+import { useSidebarNavSections } from "./use-sidebar-nav-sections";
+import {
+  HIDDEN_TASK_LABEL,
+  KODY_BACKLOG_LABEL,
+  PRIORITY_LEVELS,
+  PRIORITY_META,
+} from "@kody-ade/base/constants";
+import {
+  filterVisibleTasks,
+  markTaskHiddenInList,
+  markTaskVisibleInList,
+} from "../tasks/visibility";
+import { mapTaskCacheData, type TaskCacheData } from "../tasks/cache";
+
+interface KodyDashboardProps {
+  initialIssueNumber?: number;
+  initialModal?: "new" | "bug" | "chat" | "kody-bug";
+}
+
+const TASK_PAGE_SIZE = 10;
+const EMPTY_TASKS: KodyTask[] = [];
+
+function mutationErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message.trim()
+    ? error.message
+    : fallback;
+}
+
+function TaskPaginationControls({
+  page,
+  totalPages,
+  total,
+  onPageChange,
+}: {
+  page: number;
+  totalPages: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (totalPages <= 1 && total <= TASK_PAGE_SIZE) return null;
+  return (
+    <div className="sticky bottom-0 z-10 flex items-center justify-between border-t border-white/[0.08] bg-background/95 px-3 py-2 backdrop-blur">
+      <span className="text-xs text-muted-foreground">
+        Page {page} of {totalPages} · {total} total
+      </span>
+      <div className="flex items-center gap-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 gap-1 text-xs"
+          disabled={page <= 1}
+          onClick={() => onPageChange(Math.max(1, page - 1))}
+        >
+          <ChevronLeft className="w-3.5 h-3.5" />
+          Previous
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 gap-1 text-xs"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+        >
+          Next
+          <ChevronRight className="w-3.5 h-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export function KodyDashboard({
+  initialIssueNumber,
+  initialModal,
+}: KodyDashboardProps) {
+  const navSections = useSidebarNavSections();
+  const initialIssueRef = useRef(initialIssueNumber);
+  // Track if initial modal has been handled to prevent re-opening on tasks change
+  const initialModalHandledRef = useRef(false);
+  // #1: Track selection by issue number, derive task from query data
+  const [selectedIssueNumber, setSelectedIssueNumber] = useState<number | null>(
+    null,
+  );
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [showBugDialog, setShowBugDialog] = useState(false);
+  const [showKodyBugDialog, setShowKodyBugDialog] = useState(false);
+  const [editingTask, setEditingTask] = useState<KodyTask | null>(null);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+  const [duplicateSource, setDuplicateSource] = useState<KodyTask | null>(null);
+  const [dateFilter, setDateFilter] = useState<string>("30d");
+  const [labelFilter, setLabelFilter] = useState<string>("all");
+  const [priorityFilter, setPriorityFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [viewMode, setViewMode] = useState<ViewMode>("running");
+  const [pagedTaskPages, setPagedTaskPages] = useState({
+    backlog: 1,
+    history: 1,
+  });
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
+  const [showMobileDetail, setShowMobileDetail] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [errorDismissed, setErrorDismissed] = useState(false);
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [sortField, setSortField] = useState<string>("updatedAt");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showingBacklog = viewMode === "backlog";
+  const showingHistory = viewMode === "history";
+  const isPagedTaskView = showingBacklog || showingHistory;
+  const currentTaskPage = showingHistory
+    ? pagedTaskPages.history
+    : pagedTaskPages.backlog;
+
+  const filterBarRef = useRef<{ focusSearch: () => void } | null>(null);
+
+  // Persist the list scroll position across list → task detail → back.
+  // The list subtree fully unmounts when a task is selected, so a module-
+  // scoped store keyed by the API list page + filters is what survives.
+  const taskListScrollKey = `dash:${viewMode}:page-${currentTaskPage}:${dateFilter}:${statusFilter}:${labelFilter}:${priorityFilter}:${debouncedSearch}:${sortField}:${sortDirection}`;
+  const listScrollRef = useScrollRestoration(taskListScrollKey);
+
+  // Persistent chat lives in the root layout (ChatRailShell). We just
+  // push our context up and read mobile-open from the shared rail API.
+  const { setScope, openMobileChat, setPageOwnsHeader } = useChatScope();
+
+  useEffect(() => {
+    setPageOwnsHeader(true);
+    return () => setPageOwnsHeader(false);
+  }, [setPageOwnsHeader]);
+
+  const handleSearchChange = useCallback((value: string) => {
+    setSearchQuery(value);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(
+      () => setDebouncedSearch(value),
+      300,
+    );
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, []);
+
+  // md breakpoint = 768px — below this is "mobile"
+  const isDesktop = useMediaQuery("(min-width: 768px)");
+  const { auth: storedAuth } = useAuth();
+
+  // Get days from filter
+  const filter = DATE_FILTERS.find((f) => f.value === dateFilter);
+  const days = filter?.days;
+  const apiViewMode =
+    viewMode === "backlog" || viewMode === "history" ? viewMode : "intake";
+  const taskQueryKey = useMemo(
+    () =>
+      queryKeys.tasks(
+        days,
+        false,
+        apiViewMode,
+        isPagedTaskView ? currentTaskPage : undefined,
+        isPagedTaskView ? TASK_PAGE_SIZE : undefined,
+        {
+          status: statusFilter,
+          label: labelFilter,
+          priority: priorityFilter,
+          q: debouncedSearch,
+          sort: sortField,
+          dir: sortDirection,
+        },
+      ),
+    [
+      days,
+      apiViewMode,
+      isPagedTaskView,
+      currentTaskPage,
+      statusFilter,
+      labelFilter,
+      priorityFilter,
+      debouncedSearch,
+      sortField,
+      sortDirection,
+    ],
+  );
+
+  // One dashboard task set backs both visible tabs:
+  // Running = assigned/executing work, Backlog = unassigned + assigned but not run.
+  const {
+    data: tasksResponse,
+    isLoading,
+    isFetching,
+    error,
+    refetch,
+    dataUpdatedAt,
+  } = useKodyTasksPage({
+    days,
+    // Board cards only need the task summary; TaskDetail fetches the full
+    // record on selection. Avoid N+1 detail work blocking the whole board.
+    includeDetails: false,
+    viewMode: apiViewMode,
+    page: isPagedTaskView ? currentTaskPage : undefined,
+    perPage: isPagedTaskView ? TASK_PAGE_SIZE : undefined,
+    status: statusFilter,
+    label: labelFilter,
+    priority: priorityFilter,
+    q: debouncedSearch,
+    sort: sortField,
+    dir: sortDirection,
+    authReady: !!storedAuth,
+    // Pause list polling while a task is open OR a full-screen modal is up
+    // (/new, /bug). The modal owns the foreground; background list will
+    // refresh on close via invalidation.
+    refetchInterval:
+      selectedIssueNumber ||
+      showCreateDialog ||
+      showBugDialog ||
+      showKodyBugDialog
+        ? false
+        : "auto",
+  });
+  const tasks = tasksResponse?.tasks ?? EMPTY_TASKS;
+  const taskPagination = tasksResponse?.pagination;
+
+  // Default-branch CI roll-up — banner uses this as its primary signal so
+  // operators can see whether main is green/red before drilling into tasks.
+  const { data: mainCi, isFetching: mainCiFetching } = useDefaultBranchCI();
+
+  // Initialize filters from URL params after hydration (prevents server/client mismatch)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const date = params.get("date");
+    if (date && DATE_FILTERS.some((f) => f.value === date)) setDateFilter(date);
+    const label = params.get("label");
+    if (label) setLabelFilter(label);
+    const priority = params.get("priority");
+    if (priority) setPriorityFilter(priority);
+    const status = params.get("status");
+    if (status) setStatusFilter(status);
+    const view = params.get("view");
+    if (view === "queue") setViewMode("running");
+    else if (view === "unassigned") setViewMode("backlog");
+    else if (view && ["backlog", "running", "history"].includes(view))
+      setViewMode(view as ViewMode);
+    const page = Number.parseInt(params.get("page") ?? "1", 10);
+    if (Number.isFinite(page) && page > 1) {
+      if (view === "history") {
+        setPagedTaskPages((prev) => ({ ...prev, history: page }));
+      } else if (view === "backlog" || view === "unassigned") {
+        setPagedTaskPages((prev) => ({ ...prev, backlog: page }));
+      }
+    }
+    const q = params.get("q");
+    if (q) {
+      setSearchQuery(q);
+      setDebouncedSearch(q);
+    }
+    const sort = params.get("sort");
+    if (sort) setSortField(sort);
+    const dir = params.get("dir");
+    if (dir === "asc" || dir === "desc") setSortDirection(dir);
+  }, []);
+
+  useEffect(() => {
+    setPagedTaskPages({ backlog: 1, history: 1 });
+  }, [
+    dateFilter,
+    statusFilter,
+    labelFilter,
+    priorityFilter,
+    debouncedSearch,
+    sortField,
+    sortDirection,
+  ]);
+
+  const queryClient = useQueryClient();
+
+  // Helper to handle auth errors — redirects to login if session expired
+  const handleAuthError = (error: Error) => {
+    if (error instanceof SessionExpiredError) {
+      redirectToLogin();
+      return true;
+    }
+    return false;
+  };
+
+  // A deep-linked task from a CTO inbox rec arrives by *number*, but that
+  // number means different things per rec type:
+  //   • legacy / execute / fix recs  → the number IS the task issue
+  //   • PR-health recs (fix-ci/sync/resolve) → the rec lives on a PR, so
+  //     the number is the PR number, NOT the issue
+  // It's also usually closed/merged, so it's not in the day-windowed poll.
+  // Match the poll by issue number first, then by associated PR number, and
+  // only fall back to an on-demand single fetch when neither hits — so the
+  // detail card opens instead of silently landing on the bare list.
+  const selectedInPoll =
+    selectedIssueNumber != null &&
+    tasks.some(
+      (t) =>
+        t.issueNumber === selectedIssueNumber ||
+        t.associatedPR?.number === selectedIssueNumber,
+    );
+  const selectedMissingFromPoll =
+    selectedIssueNumber != null && !selectedInPoll;
+
+  const { data: fetchedSelected } = useQuery({
+    queryKey: ["kody-task-deeplink", selectedIssueNumber],
+    queryFn: () => kodyApi.tasks.get(selectedIssueNumber as number),
+    enabled: selectedMissingFromPoll && !!getStoredAuth(),
+    staleTime: 30_000,
+  });
+
+  // #1: Derive selectedTask from query data — always fresh. Prefer the live
+  // poll (by issue, then by PR number for PR-health recs); fall back to the
+  // on-demand fetch for out-of-window deep links.
+  const selectedTask = useMemo(
+    () =>
+      selectedIssueNumber
+        ? (tasks.find((t) => t.issueNumber === selectedIssueNumber) ??
+          tasks.find((t) => t.associatedPR?.number === selectedIssueNumber) ??
+          fetchedSelected?.task ??
+          null)
+        : null,
+    [selectedIssueNumber, tasks, fetchedSelected],
+  );
+
+  // When a deep link resolved via PR number, realign the selected id to the
+  // task's real issue so the URL (`/<issue>`) and detail header are correct.
+  useEffect(() => {
+    if (
+      selectedTask &&
+      selectedIssueNumber != null &&
+      selectedTask.issueNumber !== selectedIssueNumber
+    ) {
+      setSelectedIssueNumber(selectedTask.issueNumber);
+    }
+  }, [selectedTask, selectedIssueNumber]);
+
+  // GitHub identity — verified via OAuth session cookie
+  const { githubUser, authError } = useGitHubIdentity();
+
+  const visibleTasks = useMemo(() => filterVisibleTasks(tasks), [tasks]);
+
+  // Auth presence — when no PAT is saved we render the dashboard chrome
+  // normally but swap the task pane for `<RepoManager />` so the user
+  // can connect their first repository without losing the app shell
+  // (chat rail, headers, banners all remain visible).
+  const noAuth = !storedAuth;
+  const pushKodyPath = useCallback(
+    (href: string) => {
+      window.history.pushState(
+        null,
+        "",
+        storedAuth ? repoScopedHref(storedAuth, href) : href,
+      );
+    },
+    [storedAuth],
+  );
+
+  // Fetch collaborators for assignee picker
+  const { data: collaborators = [] } = useQuery({
+    queryKey: ["kody-collaborators"],
+    queryFn: () => kodyApi.collaborators.list(),
+    enabled: !!storedAuth,
+    staleTime: 10 * 60 * 1000, // 10 minutes
+  });
+
+  // Mutations for assign/unassign
+  const assignMutation = useMutation({
+    mutationFn: ({
+      issueNumber,
+      assignees,
+    }: {
+      issueNumber: number;
+      assignees: string[];
+    }) => kodyApi.tasks.assign(issueNumber, assignees, githubUser?.login),
+    onSuccess: () => {
+      toast.success("Assigned");
+    },
+    onError: (error) => {
+      if (!handleAuthError(error)) {
+        toast.error("Failed to assign");
+      }
+    },
+  });
+
+  const unassignMutation = useMutation({
+    mutationFn: ({
+      issueNumber,
+      assignees,
+    }: {
+      issueNumber: number;
+      assignees: string[];
+    }) => kodyApi.tasks.unassign(issueNumber, assignees, githubUser?.login),
+    onSuccess: () => {
+      toast.success("Unassigned");
+    },
+    onError: (error) => {
+      if (!handleAuthError(error)) {
+        toast.error("Failed to unassign");
+      }
+    },
+  });
+
+  const assignToKodyMutation = useMutation({
+    mutationFn: (task: KodyTask) =>
+      kodyApi.tasks.addLabel(
+        task.issueNumber,
+        KODY_BACKLOG_LABEL,
+        githubUser?.login,
+      ),
+    onMutate: async (task) => {
+      await queryClient.cancelQueries({ queryKey: ["kody-tasks"] });
+      const previous = queryClient.getQueriesData<TaskCacheData>({
+        queryKey: ["kody-tasks"],
+      });
+      queryClient.setQueriesData<TaskCacheData>(
+        { queryKey: ["kody-tasks"] },
+        (old) =>
+          mapTaskCacheData(old, (cachedTasks) =>
+            cachedTasks.map((t) =>
+              t.issueNumber === task.issueNumber &&
+              !t.labels.includes(KODY_BACKLOG_LABEL)
+                ? { ...t, labels: [...t.labels, KODY_BACKLOG_LABEL] }
+                : t,
+            ),
+          ),
+      );
+      return { previous };
+    },
+    onSuccess: () => {
+      toast.success("Assigned to Kody backlog");
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.tasks(days, false, "all"),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.tasks(days, false, "intake"),
+      });
+    },
+    onError: (error, _task, context) => {
+      for (const [key, value] of context?.previous ?? []) {
+        queryClient.setQueryData(key, value);
+      }
+      if (!handleAuthError(error)) {
+        toast.error("Failed to assign to Kody");
+      }
+    },
+  });
+
+  const unassignFromKodyMutation = useMutation({
+    mutationFn: (task: KodyTask) =>
+      kodyApi.tasks.removeLabel(
+        task.issueNumber,
+        KODY_BACKLOG_LABEL,
+        githubUser?.login,
+      ),
+    onMutate: async (task) => {
+      await queryClient.cancelQueries({ queryKey: ["kody-tasks"] });
+      const previous = queryClient.getQueriesData<TaskCacheData>({
+        queryKey: ["kody-tasks"],
+      });
+      queryClient.setQueriesData<TaskCacheData>(
+        { queryKey: ["kody-tasks"] },
+        (old) =>
+          mapTaskCacheData(old, (cachedTasks) =>
+            cachedTasks.map((t) =>
+              t.issueNumber === task.issueNumber
+                ? {
+                    ...t,
+                    labels: t.labels.filter(
+                      (label) => label !== KODY_BACKLOG_LABEL,
+                    ),
+                  }
+                : t,
+            ),
+          ),
+      );
+      return { previous };
+    },
+    onSuccess: () => {
+      toast.success("Removed from Kody backlog");
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.tasks(days, false, "all"),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.tasks(days, false, "intake"),
+      });
+    },
+    onError: (error, _task, context) => {
+      for (const [key, value] of context?.previous ?? []) {
+        queryClient.setQueryData(key, value);
+      }
+      if (!handleAuthError(error)) {
+        toast.error("Failed to remove from Kody backlog");
+      }
+    },
+  });
+
+  // #2: Replace manual try/catch handlers with mutations + optimistic updates
+  const executeMutation = useMutation({
+    mutationFn: (task: KodyTask) => tasksApi.execute(task.issueNumber),
+    // #3: Optimistic update — move task to "building" immediately
+    onMutate: async (task) => {
+      await queryClient.cancelQueries({ queryKey: taskQueryKey });
+      const previous = queryClient.getQueryData<TaskCacheData>(taskQueryKey);
+      queryClient.setQueryData<TaskCacheData>(taskQueryKey, (old) =>
+        mapTaskCacheData(old, (cachedTasks) =>
+          cachedTasks.map((t) => {
+            if (t.id !== task.id) return t;
+            const labels = t.labels.includes(KODY_BACKLOG_LABEL)
+              ? t.labels
+              : [...t.labels, KODY_BACKLOG_LABEL];
+            return { ...t, labels, column: "building" as const };
+          }),
+        ),
+      );
+      return { previous };
+    },
+    onError: (error, _task, context) => {
+      if (handleAuthError(error)) return;
+      if (context?.previous) {
+        queryClient.setQueryData(taskQueryKey, context.previous);
+      }
+      toast.error(mutationErrorMessage(error, "Failed to start task"));
+    },
+    onSuccess: () => {
+      toast.success("Task started");
+      // Let polling handle the refresh — don't force an immediate refetch
+    },
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: (task: KodyTask) =>
+      tasksApi.abort(task.issueNumber, githubUser?.login),
+    onError: (error) => {
+      if (handleAuthError(error)) return;
+      toast.error("Failed to stop task");
+    },
+    onSuccess: () => {
+      toast.success("Stop requested");
+    },
+  });
+
+  const mergeMutation = useMutation({
+    mutationFn: (task: KodyTask) =>
+      tasksApi.approveReview(task, githubUser?.login),
+    onMutate: async (task) => {
+      await queryClient.cancelQueries({ queryKey: taskQueryKey });
+      const previous = queryClient.getQueryData<TaskCacheData>(taskQueryKey);
+      queryClient.setQueryData<TaskCacheData>(taskQueryKey, (old) =>
+        mapTaskCacheData(old, (cachedTasks) =>
+          cachedTasks.map((t) =>
+            t.id === task.id ? { ...t, column: "done" as const } : t,
+          ),
+        ),
+      );
+      return { previous };
+    },
+    onError: (error, _task, context) => {
+      if (handleAuthError(error)) return;
+      if (context?.previous) {
+        queryClient.setQueryData(taskQueryKey, context.previous);
+      }
+      toast.error("Failed to merge PR");
+    },
+    onSuccess: () => {
+      toast.success("PR merged");
+      // Return user to the dashboard: close preview modal, deselect task,
+      // and refresh the task list (server already closed the issue).
+      setShowPreview(false);
+      setSelectedIssueNumber(null);
+      setShowMobileDetail(false);
+      pushKodyPath("/");
+      queryClient.invalidateQueries({ queryKey: taskQueryKey });
+    },
+  });
+
+  const taskVisibilityMutation = useMutation({
+    mutationFn: ({ task, hidden }: { task: KodyTask; hidden: boolean }) =>
+      hidden
+        ? kodyApi.tasks.addLabel(
+            task.issueNumber,
+            HIDDEN_TASK_LABEL,
+            githubUser?.login,
+          )
+        : kodyApi.tasks.removeLabel(
+            task.issueNumber,
+            HIDDEN_TASK_LABEL,
+            githubUser?.login,
+          ),
+    onMutate: async ({ task, hidden }) => {
+      await queryClient.cancelQueries({ queryKey: ["kody-tasks"] });
+      const previous = queryClient.getQueriesData<TaskCacheData>({
+        queryKey: ["kody-tasks"],
+      });
+      queryClient.setQueriesData<TaskCacheData>(
+        { queryKey: ["kody-tasks"] },
+        (old) => {
+          return mapTaskCacheData(old, (cachedTasks) =>
+            hidden
+              ? markTaskHiddenInList(cachedTasks, task.issueNumber)
+              : markTaskVisibleInList(cachedTasks, task.issueNumber),
+          );
+        },
+      );
+      return { previous };
+    },
+    onError: (error, _vars, context) => {
+      for (const [key, value] of context?.previous ?? []) {
+        queryClient.setQueryData(key, value);
+      }
+      if (!handleAuthError(error)) {
+        toast.error("Failed to update task visibility");
+      }
+    },
+    onSuccess: (_data, { task, hidden }) => {
+      if (hidden) {
+        toast.success("Task hidden from dashboard", {
+          action: {
+            label: "Undo",
+            onClick: () =>
+              taskVisibilityMutation.mutate({ task, hidden: false }),
+          },
+        });
+        if (selectedIssueNumber === task.issueNumber) {
+          setSelectedIssueNumber(null);
+          setShowMobileDetail(false);
+          pushKodyPath("/");
+        }
+      } else {
+        toast.success("Task shown in dashboard");
+      }
+      queryClient.invalidateQueries({ queryKey: ["kody-tasks"] });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.taskDetails(task.issueNumber),
+      });
+    },
+  });
+
+  const rerunMutation = useMutation({
+    mutationFn: (task: KodyTask) =>
+      tasksApi.rerun(task.issueNumber, githubUser?.login),
+    onSuccess: () => {
+      toast.success("Task rerun");
+    },
+    onError: () => {
+      toast.error("Failed to rerun task");
+    },
+  });
+
+  // Derive per-task pending state from mutations
+  const executingTaskId = executeMutation.isPending
+    ? ((executeMutation.variables as KodyTask | undefined)?.id ?? null)
+    : stopMutation.isPending
+      ? ((stopMutation.variables as KodyTask | undefined)?.id ?? null)
+      : null;
+
+  const mergingTaskId = mergeMutation.isPending
+    ? ((mergeMutation.variables as KodyTask | undefined)?.id ?? null)
+    : null;
+
+  // Handlers now just delegate to mutations
+  const handleExecuteTask = useCallback(
+    (task: KodyTask) => {
+      executeMutation.mutate(task);
+    },
+    [executeMutation],
+  );
+
+  const handleStopTask = useCallback(
+    (task: KodyTask) => {
+      stopMutation.mutate(task);
+    },
+    [stopMutation],
+  );
+
+  const handleMerge = useCallback(
+    async (task: KodyTask) => {
+      if (!task.associatedPR) return;
+      mergeMutation.mutate(task);
+    },
+    [mergeMutation],
+  );
+
+  // #4: Prefetch task details on hover
+  const handleTaskHover = useCallback(
+    (task: KodyTask) => {
+      queryClient.prefetchQuery({
+        queryKey: queryKeys.taskDetails(task.issueNumber),
+        queryFn: async () => {
+          // Catch and swallow errors — GitHub API 502s are transient and shouldn't log as errors
+          try {
+            return await kodyApi.tasks.get(task.issueNumber);
+          } catch {
+            return undefined;
+          }
+        },
+        staleTime: 60_000, // 60s — don't re-prefetch on rapid hovers
+      });
+    },
+    [queryClient],
+  );
+
+  // Notification system — the store is hoisted into NotificationsProvider
+  // so VibePage and the dashboard share one source of truth. We still call
+  // `useBrowserNotifications` here (with the shared store) to get the
+  // dashboard-specific `checkTaskChanges` callback used below.
+  const { store: notificationStore } = useNotifications();
+  const { checkTaskChanges } = useBrowserNotifications({
+    store: notificationStore,
+  });
+
+  // Check for task changes when tasks update
+  useEffect(() => {
+    if (visibleTasks.length > 0) {
+      checkTaskChanges(visibleTasks);
+      setErrorDismissed(false); // Reset banner dismissal on successful fetch
+    }
+  }, [visibleTasks, dataUpdatedAt, checkTaskChanges]);
+
+  // Persist filter state in URL params
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (dateFilter !== "30d") params.set("date", dateFilter);
+    else params.delete("date");
+    if (statusFilter !== "all") params.set("status", statusFilter);
+    else params.delete("status");
+    if (labelFilter !== "all") params.set("label", labelFilter);
+    else params.delete("label");
+    if (priorityFilter !== "all") params.set("priority", priorityFilter);
+    else params.delete("priority");
+    if (viewMode !== "running") params.set("view", viewMode);
+    else params.delete("view");
+    if (isPagedTaskView && currentTaskPage > 1) {
+      params.set("page", String(currentTaskPage));
+    } else {
+      params.delete("page");
+    }
+    if (debouncedSearch) params.set("q", debouncedSearch);
+    else params.delete("q");
+    const search = params.toString();
+    const newUrl = window.location.pathname + (search ? `?${search}` : "");
+    window.history.replaceState(null, "", newUrl);
+  }, [
+    dateFilter,
+    statusFilter,
+    labelFilter,
+    priorityFilter,
+    viewMode,
+    isPagedTaskView,
+    currentTaskPage,
+    debouncedSearch,
+  ]);
+
+  // Get unique labels from tasks (excluding internal/system labels)
+  const availableLabels = Array.from(
+    new Set(visibleTasks.flatMap((task) => task.labels)),
+  )
+    .filter(
+      (label) =>
+        ![
+          "agent:done",
+          "agent:error",
+          "agent:running",
+          "wontfix",
+          "invalid",
+          "duplicate",
+          "question",
+          "good first issue",
+          "help wanted",
+          "released",
+        ].includes(label),
+    )
+    .sort();
+
+  // Calculate label counts
+  const labelCounts = visibleTasks.reduce(
+    (acc, task) => {
+      task.labels.forEach((label) => {
+        acc[label] = (acc[label] || 0) + 1;
+      });
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+
+  // Calculate status counts
+  const statusCounts = visibleTasks.reduce(
+    (acc, task) => {
+      acc[task.column] = (acc[task.column] || 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+
+  const totalCount = visibleTasks.length;
+
+  // Backlog is the unified intake: unassigned issues plus assigned open tasks.
+  const viewCounts = getViewModeCounts(visibleTasks);
+  const runningCount =
+    tasksResponse?.counts?.running ?? viewCounts.runningCount;
+  const backlogCount =
+    tasksResponse?.counts?.backlog ?? viewCounts.backlogCount;
+  const historyCount =
+    tasksResponse?.counts?.history ?? viewCounts.historyCount;
+  const visibleHistoryCount = showingHistory ? historyCount : undefined;
+  const queueCount = viewCounts.queueCount;
+
+  // Filter tasks by view mode, then by status and label (combined with AND logic).
+  // useMemo is load-bearing: without it the function returns a fresh array every
+  // render, cascading instability through sortedTasks → filteredTasks →
+  // plannerExistingTasksForChat → the chat-rail setScope effect, which then
+  // fires every render and can trip React error #185.
+  const baseFilteredTasks = useMemo(
+    () =>
+      filterTasksByView(visibleTasks, {
+        viewMode,
+        statusFilter,
+        labelFilter,
+        priorityFilter,
+      }),
+    [
+      visibleTasks,
+      viewMode,
+      statusFilter,
+      labelFilter,
+      priorityFilter,
+    ],
+  );
+  const searchedTasks = useMemo(() => {
+    if (!debouncedSearch.trim()) return baseFilteredTasks;
+    const q = debouncedSearch.toLowerCase();
+    return baseFilteredTasks.filter(
+      (t) =>
+        t.title.toLowerCase().includes(q) || String(t.issueNumber).includes(q),
+    );
+  }, [baseFilteredTasks, debouncedSearch]);
+
+  // Sort tasks
+  const sortedTasks = useMemo(
+    () => sortTasks(searchedTasks, sortField as SortField, sortDirection),
+    [searchedTasks, sortField, sortDirection],
+  );
+
+  const filteredTasks = sortedTasks;
+
+  // Keyboard shortcuts (after sortedTasks is defined)
+  useKeyboardShortcuts({
+    isModalOpen:
+      showCreateDialog ||
+      !!editingTask ||
+      showBugDialog ||
+      showKodyBugDialog ||
+      showPreview ||
+      showShortcutsHelp ||
+      showMobileMenu ||
+      showMobileDetail,
+    onNavigateDown: () =>
+      setFocusedIndex((i) => Math.min(i + 1, sortedTasks.length - 1)),
+    onNavigateUp: () => setFocusedIndex((i) => Math.max(i - 1, 0)),
+    onOpenSelected: () => {
+      if (sortedTasks[focusedIndex])
+        handleTaskSelect(sortedTasks[focusedIndex]);
+    },
+    onCloseDetail: () => {
+      if (selectedTask) handleTaskSelect(null);
+      else if (showPreview) setShowPreview(false);
+      else if (showShortcutsHelp) setShowShortcutsHelp(false);
+    },
+    onRefresh: () => refetch(),
+    onNewTask: () => setShowCreateDialog(true),
+    onEdit: () => {
+      if (selectedTask && selectedTask.column === "open")
+        setEditingTask(selectedTask);
+    },
+    onOpenPreview: () => {
+      if (selectedTask?.associatedPR) setShowPreview(true);
+    },
+    onFocusSearch: () => {
+      filterBarRef.current?.focusSearch();
+    },
+    onShowHelp: () => setShowShortcutsHelp(true),
+  });
+
+  // Reset focused index when task list changes
+  useEffect(() => {
+    setFocusedIndex(0);
+  }, [
+    sortedTasks.length,
+    viewMode,
+    statusFilter,
+    labelFilter,
+    priorityFilter,
+    debouncedSearch,
+  ]);
+
+  // Check for specific errors
+  const isRateLimited = error instanceof RateLimitError;
+  const isNoToken = error instanceof NoTokenError;
+  const isSessionExpired = error instanceof SessionExpiredError;
+
+  // Get retry info from error
+  const retryAfter = isRateLimited
+    ? (error as RateLimitError).retryAfter
+    : null;
+  const resetTime = isRateLimited ? (error as RateLimitError).resetTime : null;
+
+  // Live-tick "X minutes" countdown derived from the GitHub
+  // x-ratelimit-reset epoch. Falls back to the static `retryAfter` string
+  // (e.g. "45 minutes") that the server snapshotted at error time.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isRateLimited) return;
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, [isRateLimited]);
+
+  const minutesUntilReset = useMemo(() => {
+    if (!resetTime) return null;
+    const ts = Date.parse(resetTime);
+    if (!Number.isFinite(ts)) return null;
+    return Math.max(0, Math.ceil((ts - now) / 60_000));
+  }, [resetTime, now]);
+
+  const rateLimitCountdown =
+    minutesUntilReset !== null
+      ? minutesUntilReset === 0
+        ? "any moment now"
+        : `in ${minutesUntilReset} minute${minutesUntilReset === 1 ? "" : "s"}`
+      : retryAfter
+        ? `in ${retryAfter}`
+        : null;
+
+  const rateLimitResetClock = useMemo(() => {
+    if (!resetTime) return null;
+    const d = new Date(resetTime);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }, [resetTime]);
+
+  // Helper: extract issue number from URL pathname
+  const getIssueFromUrl = () => {
+    const match = window.location.pathname.match(/\/(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  };
+
+  // Helper: check if URL is a preview URL
+  const isPreviewUrl = () => /\/\d+\/preview/.test(window.location.pathname);
+
+  // Helper: detect modal route from URL
+  const getModalFromUrl = (): "new" | "bug" | "chat" | "kody-bug" | null => {
+    const path = repoPathForNavMatching(window.location.pathname);
+    if (path === "/new") return "new";
+    if (path === "/bug") return "bug";
+    if (path === "/report-kody-bug") return "kody-bug";
+    if (path === "/chat") return "chat";
+    return null;
+  };
+
+  // Helper: push base URL (used when closing modals)
+  const pushKodyBase = useCallback(() => pushKodyPath("/"), [pushKodyPath]);
+
+  // Open preview modal with URL sync
+  const handleOpenPreview = useCallback(
+    (task: KodyTask) => {
+      setSelectedIssueNumber(task.issueNumber);
+      setShowPreview(true);
+      pushKodyPath(`/${task.issueNumber}/preview`);
+    },
+    [pushKodyPath],
+  );
+
+  // Close preview modal with URL sync
+  const handleClosePreview = useCallback(() => {
+    setShowPreview(false);
+    if (selectedIssueNumber) {
+      pushKodyPath(`/${selectedIssueNumber}`);
+    }
+  }, [pushKodyPath, selectedIssueNumber]);
+
+  // Open/close modal dialogs with URL sync
+  const handleOpenCreate = useCallback(() => {
+    setShowCreateDialog(true);
+    pushKodyPath("/new");
+  }, [pushKodyPath]);
+
+  const handleCloseCreate = useCallback(() => {
+    setShowCreateDialog(false);
+    setDuplicateSource(null);
+    pushKodyBase();
+  }, [pushKodyBase]);
+
+  const handleOpenBug = useCallback(() => {
+    setShowBugDialog(true);
+    pushKodyPath("/bug");
+  }, [pushKodyPath]);
+
+  const handleCloseBug = useCallback(() => {
+    setShowBugDialog(false);
+    pushKodyBase();
+  }, [pushKodyBase]);
+
+  const handleOpenKodyBug = useCallback(() => {
+    setShowKodyBugDialog(true);
+    pushKodyPath("/report-kody-bug");
+  }, [pushKodyPath]);
+
+  const handleCloseKodyBug = useCallback(() => {
+    setShowKodyBugDialog(false);
+    pushKodyBase();
+  }, [pushKodyBase]);
+
+  const handleOpenChat = useCallback(() => {
+    openMobileChat();
+    pushKodyPath("/chat");
+  }, [openMobileChat, pushKodyPath]);
+
+  // Handle task duplication
+  const handleDuplicateTask = useCallback(
+    (task: KodyTask) => {
+      setDuplicateSource(task);
+      handleOpenCreate();
+    },
+    [handleOpenCreate],
+  );
+
+  // Task selection — uses pushState for browser history support
+  const handleTaskSelect = useCallback(
+    (task: KodyTask | null) => {
+      if (task) {
+        setSelectedIssueNumber(task.issueNumber);
+        pushKodyPath(`/${task.issueNumber}`);
+        if (!isDesktop) {
+          setShowMobileDetail(true);
+        }
+      } else {
+        setSelectedIssueNumber(null);
+        setShowMobileDetail(false);
+        pushKodyPath("/");
+        // Refresh once on close — polling was paused while the modal was open.
+        queryClient.invalidateQueries({ queryKey: taskQueryKey });
+      }
+    },
+    [isDesktop, pushKodyPath, queryClient, taskQueryKey],
+  );
+
+  // Auto-select task from URL on initial load
+  useEffect(() => {
+    // Only handle initial modal once to prevent re-opening on tasks change
+    if (!initialModalHandledRef.current) {
+      initialModalHandledRef.current = true;
+      const modal = initialModal || getModalFromUrl();
+      if (modal) {
+        if (modal === "new") setShowCreateDialog(true);
+        else if (modal === "bug") setShowBugDialog(true);
+        else if (modal === "kody-bug") setShowKodyBugDialog(true);
+        else if (modal === "chat") openMobileChat();
+        return;
+      }
+    }
+
+    // Check for preview URL on initial load
+    if (isPreviewUrl()) {
+      const issueNum = getIssueFromUrl();
+      if (issueNum) {
+        setSelectedIssueNumber(issueNum);
+        setShowPreview(true);
+        initialIssueRef.current = undefined;
+        return;
+      }
+    }
+
+    const issueNum = initialIssueRef.current;
+    if (!issueNum || selectedIssueNumber) return;
+
+    // Select immediately, even if the issue isn't in the polled window.
+    // `selectedTask` falls back to an on-demand fetch (fetchedSelected),
+    // so closed/merged tasks deep-linked from the inbox still open.
+    setSelectedIssueNumber(issueNum);
+    if (!isDesktop) {
+      setShowMobileDetail(true);
+    }
+    initialIssueRef.current = undefined;
+  }, [tasks, isDesktop]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Browser back/forward — listen to popstate and sync selected task
+  useEffect(() => {
+    const handlePopState = () => {
+      // Close all modals first
+      setShowCreateDialog(false);
+      setShowBugDialog(false);
+      setShowKodyBugDialog(false);
+      setShowPreview(false);
+
+      // Check for modal routes
+      const modal = getModalFromUrl();
+      if (modal) {
+        if (modal === "new") setShowCreateDialog(true);
+        else if (modal === "bug") setShowBugDialog(true);
+        else if (modal === "kody-bug") setShowKodyBugDialog(true);
+        else if (modal === "chat") openMobileChat();
+        return;
+      }
+
+      if (isPreviewUrl()) {
+        const issueNum = getIssueFromUrl();
+        if (issueNum) {
+          setSelectedIssueNumber(issueNum);
+          setShowPreview(true);
+        }
+        return;
+      }
+
+      const issueNum = getIssueFromUrl();
+      if (issueNum) {
+        setSelectedIssueNumber(issueNum);
+        if (!isDesktop) setShowMobileDetail(true);
+      } else {
+        setSelectedIssueNumber(null);
+        setShowMobileDetail(false);
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [isDesktop, openMobileChat]);
+
+  // Mobile filter controls — rendered inside the mobile menu Sheet
+  const mobileFilterControls = (
+    <>
+      <ViewToggle
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        runningCount={runningCount}
+        backlogCount={backlogCount}
+        historyCount={visibleHistoryCount}
+      />
+      {/* Date filter */}
+      <Select value={dateFilter} onValueChange={setDateFilter}>
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder="Filter by date" />
+        </SelectTrigger>
+        <SelectContent>
+          {DATE_FILTERS.map((f) => (
+            <SelectItem key={f.value} value={f.value}>
+              {f.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {/* Status filter */}
+      <Select value={statusFilter} onValueChange={setStatusFilter}>
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder="Filter by status" />
+        </SelectTrigger>
+        <SelectContent>
+          {STATUS_FILTERS.map((f) => (
+            <SelectItem key={f.value} value={f.value}>
+              {f.label} (
+              {f.value === "all" ? totalCount : statusCounts[f.value] || 0})
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {/* Label filter */}
+      <Select value={labelFilter} onValueChange={setLabelFilter}>
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder="Filter by label" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">All ({totalCount})</SelectItem>
+          {availableLabels.map((label) => (
+            <SelectItem key={label} value={label}>
+              {label} ({labelCounts[label] || 0})
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {/* Priority filter */}
+      <Select value={priorityFilter} onValueChange={setPriorityFilter}>
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder="Filter by priority" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">All priorities</SelectItem>
+          {PRIORITY_LEVELS.map((level) => (
+            <SelectItem key={level} value={level}>
+              {PRIORITY_META[level].badge} {level} —{" "}
+              {PRIORITY_META[level].label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </>
+  );
+
+  // Push our context into the persistent chat rail (in the root layout).
+  // We build the context object INSIDE the effect rather than at render
+  // time so the value identity doesn't churn every render (which would
+  // ping-pong with the rail's state and trigger an infinite update loop).
+  // Effect deps are the real inputs — primitives plus stable-ref hooks.
+  useEffect(() => {
+    if (selectedTask) {
+      setScope({ kind: "task", task: selectedTask });
+    } else {
+      setScope(null);
+    }
+    return () => setScope(null);
+  }, [
+    selectedTask,
+    setScope,
+  ]);
+
+  // Mobile-only button that opens the chat Sheet — used in error takeovers so
+  // mobile users can still reach Kody when the dashboard is otherwise blocked.
+  const mobileChatEscapeHatch = (
+    <Button
+      variant="outline"
+      onClick={handleOpenChat}
+      className="md:hidden mt-2"
+    >
+      <MessageSquare className="w-4 h-4 mr-2" />
+      Chat with Kody
+    </Button>
+  );
+
+  // Error takeover content. Chat rail + sidebar come from the root
+  // layout (ChatRailShell); on mobile the FAB and the assistant escape
+  // hatch button below both open the same Sheet.
+  const renderErrorTakeover = (content: React.ReactNode) => (
+    <div className="h-full flex flex-col overflow-hidden">
+      <KodyHeader
+        onOpenMobileMenu={() => setShowMobileMenu(true)}
+        onRefresh={() => refetch()}
+        isFetching={isFetching}
+        showRefresh={false}
+      />
+      <div className="flex-1 flex items-center justify-center">{content}</div>
+      <MobileMenu
+        open={showMobileMenu}
+        onOpenChange={setShowMobileMenu}
+        sections={navSections}
+        pinnedItem={DASHBOARD_NAV_ITEM}
+      />
+    </div>
+  );
+
+  // Session expired — can happen in both OAuth and token-only mode
+  if (isSessionExpired) {
+    return renderErrorTakeover(
+      <div className="text-center max-w-md p-6">
+        <div className="text-6xl mb-4">⚠️</div>
+        <h2 className="text-xl font-semibold text-foreground mb-2">
+          Authentication Error
+        </h2>
+        <p className="text-muted-foreground mb-4">
+          {error?.message ?? "Your session is invalid."}
+        </p>
+        <div className="flex flex-col items-center gap-2">
+          <Button onClick={() => refetch()}>Retry</Button>
+          {mobileChatEscapeHatch}
+        </div>
+      </div>,
+    );
+  }
+
+  // No token error — can't function without token, but keep chat available
+  if (isNoToken) {
+    return renderErrorTakeover(
+      <div className="text-center max-w-md p-6">
+        <div className="text-6xl mb-4">⚠️</div>
+        <h2 className="text-xl font-semibold text-foreground mb-2">
+          Unable to Load Tasks
+        </h2>
+        <p className="text-muted-foreground mb-4">
+          {error?.message ||
+            "GitHub token is not configured. Set GITHUB_TOKEN, KODY_BOT_TOKEN, or GH_PAT in environment variables."}
+        </p>
+        <div className="flex flex-col items-center gap-2">
+          <Button onClick={() => refetch()}>Retry</Button>
+          {mobileChatEscapeHatch}
+        </div>
+      </div>,
+    );
+  }
+
+  // Auth error from /api/kody/auth/me (token valid but repo access denied)
+  if (authError) {
+    return renderErrorTakeover(
+      <div className="text-center max-w-md p-6">
+        <div className="text-6xl mb-4">🔒</div>
+        <h2 className="text-xl font-semibold text-foreground mb-2">
+          Authentication Failed
+        </h2>
+        <p className="text-muted-foreground mb-4">{authError}</p>
+        <p className="text-sm text-muted-foreground mb-4">
+          Check that your token has access to the repository and try logging in
+          again.
+        </p>
+        <div className="flex flex-col items-center gap-2">
+          <Button
+            onClick={() => {
+              localStorage.removeItem("kody_auth");
+              window.location.href = "/";
+            }}
+          >
+            Connect repository
+          </Button>
+          {mobileChatEscapeHatch}
+        </div>
+      </div>,
+    );
+  }
+
+  // Rate limit takeover — show live countdown until the GitHub limit refreshes
+  if (isRateLimited) {
+    return renderErrorTakeover(
+      <div className="text-center max-w-md p-6">
+        <div className="text-6xl mb-4">🚦</div>
+        <h2 className="text-xl font-semibold text-foreground mb-2">
+          GitHub API rate limit reached
+        </h2>
+        <p className="text-muted-foreground mb-2">
+          {rateLimitCountdown
+            ? `Refreshes ${rateLimitCountdown}`
+            : "Refresh window unknown"}
+          {rateLimitResetClock ? ` (at ${rateLimitResetClock})` : ""}
+        </p>
+        <p className="text-sm text-muted-foreground mb-4">
+          The dashboard shares one GitHub token across all users. Polling will
+          resume automatically once the window resets.
+        </p>
+        <div className="flex flex-col items-center gap-2">
+          <Button onClick={() => refetch()}>Retry now</Button>
+          {mobileChatEscapeHatch}
+        </div>
+      </div>,
+    );
+  }
+
+  // Generic error fallback (covers non-rate-limit GitHub failures)
+  if (error) {
+    return renderErrorTakeover(
+      <div className="text-center max-w-md p-6">
+        <div className="text-6xl mb-4">⚠️</div>
+        <h2 className="text-xl font-semibold text-foreground mb-2">
+          Failed to Load Tasks
+        </h2>
+        <p className="text-muted-foreground mb-4">{error.message}</p>
+        <div className="flex flex-col items-center gap-2">
+          <Button onClick={() => refetch()}>Retry</Button>
+          {mobileChatEscapeHatch}
+        </div>
+      </div>,
+    );
+  }
+
+  // Build an inline error banner message for rate limit / generic errors
+  const errorBannerMessage = !errorDismissed
+    ? isRateLimited
+      ? `GitHub API rate limited${rateLimitCountdown ? ` — refreshes ${rateLimitCountdown}` : ""}${rateLimitResetClock ? ` (at ${rateLimitResetClock})` : ""}`
+      : error
+        ? (error as Error).message
+        : null
+    : null;
+
+  const visibilityActionPending =
+    taskVisibilityMutation.isPending &&
+    selectedTask &&
+    taskVisibilityMutation.variables?.task.issueNumber ===
+      selectedTask.issueNumber
+      ? taskVisibilityMutation.variables.hidden
+        ? "hide-from-dashboard"
+        : "show-in-dashboard"
+      : null;
+
+  return (
+    <ErrorBoundary>
+      <div className="h-full flex flex-col overflow-hidden">
+        {/* Preview Modal — full-screen overlay */}
+        {showPreview && selectedTask && (
+          <PreviewModal
+            task={selectedTask}
+            onClose={handleClosePreview}
+            onMerge={() => handleMerge(selectedTask)}
+            isMerging={!!(mergingTaskId === selectedTask.id)}
+            onRefresh={refetch}
+            isRefreshing={isFetching}
+          />
+        )}
+        {/* Chat rail + primary nav are owned by the root layout
+            (ChatRailShell). We render only the page content. */}
+
+        {/* Main Content */}
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+          {/* When a task is selected, TaskDetail takes over the entire left column */}
+          {selectedTask ? (
+            <TaskDetail
+              task={selectedTask}
+              onClose={() => handleTaskSelect(null)}
+              onRefresh={refetch}
+              onOpenPreview={() =>
+                selectedTask && handleOpenPreview(selectedTask)
+              }
+              onEditTask={setEditingTask}
+              onDuplicate={handleDuplicateTask}
+              onHideTask={(task) =>
+                taskVisibilityMutation.mutate({ task, hidden: true })
+              }
+              onShowTask={(task) =>
+                taskVisibilityMutation.mutate({ task, hidden: false })
+              }
+              visibilityActionPending={visibilityActionPending}
+            />
+          ) : (
+            <>
+              <KodyHeader
+                onOpenMobileMenu={() => setShowMobileMenu(true)}
+                onRefresh={() => {
+                  refetch();
+                }}
+                isFetching={isFetching}
+                showRefresh={false}
+                trailingExtras={
+                  <HeaderOverflowMenu
+                    onReportBug={handleOpenKodyBug}
+                    onRefresh={() => {
+                      refetch();
+                    }}
+                    isFetching={isFetching}
+                  />
+                }
+                filterBar={
+                  <FilterBar
+                    ref={filterBarRef}
+                    viewMode={viewMode}
+                    onViewModeChange={setViewMode}
+                    dateFilter={dateFilter}
+                    onDateFilterChange={setDateFilter}
+                    statusFilter={statusFilter}
+                    onStatusFilterChange={setStatusFilter}
+                    labelFilter={labelFilter}
+                    onLabelFilterChange={setLabelFilter}
+                    priorityFilter={priorityFilter}
+                    onPriorityFilterChange={setPriorityFilter}
+                    availableLabels={availableLabels}
+                    labelCounts={labelCounts}
+                    statusCounts={statusCounts}
+                    totalCount={totalCount}
+                    runningCount={runningCount}
+                    backlogCount={backlogCount}
+                    historyCount={visibleHistoryCount}
+                    queueCount={queueCount}
+                    searchQuery={searchQuery}
+                    onSearchChange={handleSearchChange}
+                    sortField={sortField as SortField}
+                    onSortFieldChange={setSortField}
+                    sortDirection={sortDirection}
+                    onSortDirectionChange={setSortDirection}
+                  />
+                }
+              />
+
+              {/* Error banner (rate limit / generic errors — dismissible, stale data still shown) */}
+              {errorBannerMessage && (
+                <div className="flex items-center gap-3 px-4 py-2.5 bg-red-500/10 border-b border-red-500/20 text-sm text-red-400">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span className="flex-1">{errorBannerMessage}</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs text-red-400 hover:bg-red-500/10 shrink-0"
+                    onClick={() => refetch()}
+                  >
+                    Retry
+                  </Button>
+                  {/* eslint-disable-next-line react/forbid-elements -- bare icon dismiss with no hover surface; Button ghost hover bg would visibly change it */}
+                  <button
+                    onClick={() => setErrorDismissed(true)}
+                    className="text-red-400 hover:text-red-300"
+                    aria-label="Dismiss error"
+                  >
+                    <XIcon className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Kody Status Banner */}
+              <KodyStatusBanner
+                tasks={visibleTasks}
+                mainCi={mainCi}
+                mainCiLoading={mainCiFetching}
+                isFetching={isFetching}
+                dataUpdatedAt={dataUpdatedAt}
+              />
+
+              {/* Task List */}
+              <div
+                ref={listScrollRef}
+                className="flex-1 min-h-0 overflow-y-auto"
+              >
+                {noAuth ? (
+                  // No PAT stored → show the repo-connect form in the
+                  // task pane instead of an empty list. Header, filter
+                  // bar, banners and chat rail all stay in place.
+                  <RepoManager />
+                ) : isLoading && tasks.length === 0 ? (
+                  <div className="flex items-center justify-center h-full">
+                    <div className="text-muted-foreground">Loading...</div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="grid gap-2 grid-cols-2 p-3">
+                      {/* eslint-disable-next-line react/forbid-elements -- dashed CTA with custom font weight/hover; Button base styles would visibly change it */}
+                      <button
+                        type="button"
+                        onClick={handleOpenCreate}
+                        className="flex items-center justify-center gap-1.5 rounded-md border border-dashed border-white/[0.12] bg-white/[0.02] px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-white/[0.04] hover:border-white/[0.18] transition-colors"
+                      >
+                        <Plus className="w-4 h-4" />
+                        New task
+                      </button>
+                      {/* eslint-disable-next-line react/forbid-elements -- dashed CTA with custom font weight/hover; Button base styles would visibly change it */}
+                      <button
+                        type="button"
+                        onClick={handleOpenBug}
+                        className="flex items-center justify-center gap-1.5 rounded-md border border-dashed border-white/[0.12] bg-white/[0.02] px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-white/[0.04] hover:border-white/[0.18] transition-colors"
+                      >
+                        <Bug className="w-4 h-4" />
+                        Report a bug
+                      </button>
+                    </div>
+                    <TaskList
+                      tasks={filteredTasks}
+                      selectedTask={selectedTask}
+                      executingTaskId={executingTaskId}
+                      mergingTaskId={mergingTaskId}
+                      focusedIndex={focusedIndex}
+                      onTaskSelect={handleTaskSelect}
+                      onExecuteTask={handleExecuteTask}
+                      onStopTask={handleStopTask}
+                      onApproveReview={handleMerge}
+                      onTaskHover={handleTaskHover}
+                      collaborators={collaborators}
+                      intakeMode={showingBacklog}
+                      onAssignToKody={(task) =>
+                        assignToKodyMutation.mutate(task)
+                      }
+                      onUnassignFromKody={(task) =>
+                        unassignFromKodyMutation.mutate(task)
+                      }
+                      onAssign={(issueNumber, assignees) =>
+                        assignMutation.mutate({ issueNumber, assignees })
+                      }
+                      onUnassign={(issueNumber, assignees) =>
+                        unassignMutation.mutate({ issueNumber, assignees })
+                      }
+                      onOpenPreview={handleOpenPreview}
+                      onCreateTask={handleOpenCreate}
+                      onEditTask={setEditingTask}
+                      onDuplicate={handleDuplicateTask}
+                      onHideTask={(task) =>
+                        taskVisibilityMutation.mutate({ task, hidden: true })
+                      }
+                      onShowTask={(task) =>
+                        taskVisibilityMutation.mutate({ task, hidden: false })
+                      }
+                      onRerun={(task) => rerunMutation.mutate(task)}
+                      onToggleQueue={(task) => {
+                        const isQueued = task.labels.includes("kody:queued");
+                        const action = isQueued
+                          ? tasksApi.removeFromQueue(
+                              task.issueNumber,
+                              githubUser?.login,
+                            )
+                          : tasksApi.addToQueue(
+                              task.issueNumber,
+                              githubUser?.login,
+                            );
+                        action.then(() => {
+                          toast.success(
+                            isQueued ? "Removed from queue" : "Added to queue",
+                          );
+                          refetch();
+                        });
+                      }}
+                    />
+                    {isPagedTaskView && taskPagination ? (
+                      <TaskPaginationControls
+                        page={taskPagination.page}
+                        totalPages={taskPagination.totalPages}
+                        total={taskPagination.total}
+                        onPageChange={(page) =>
+                          setPagedTaskPages((prev) => ({
+                            ...prev,
+                            [showingHistory ? "history" : "backlog"]: page,
+                          }))
+                        }
+                      />
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Mobile Menu — shared component; dashboard supplies Chat + Filters
+            + Actions and a sticky "+ New Task" CTA. */}
+        <MobileMenu
+          open={showMobileMenu}
+          onOpenChange={setShowMobileMenu}
+          sections={navSections}
+          pinnedItem={DASHBOARD_NAV_ITEM}
+          extras={
+            <>
+              <div className="px-4 pt-4">
+                <div className="text-[11px] uppercase tracking-wider text-muted-foreground/70 mb-2 px-1">
+                  Filters
+                </div>
+                <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 space-y-2">
+                  {mobileFilterControls}
+                </div>
+              </div>
+              <div className="px-4 pt-4 pb-4">
+                <div className="text-[11px] uppercase tracking-wider text-muted-foreground/70 mb-2 px-1">
+                  Actions
+                </div>
+                <div className="space-y-1.5">
+                  <Button
+                    variant="ghost"
+                    className="w-full justify-start gap-2 h-11"
+                    onClick={() => {
+                      refetch();
+                    }}
+                    disabled={isFetching}
+                  >
+                    <RefreshCw
+                      className={cn(
+                        "w-4 h-4 text-muted-foreground",
+                        isFetching && "animate-spin",
+                      )}
+                    />
+                    Refresh
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="w-full justify-start gap-2 h-11"
+                    onClick={() => {
+                      setShowMobileMenu(false);
+                      handleOpenBug();
+                    }}
+                  >
+                    <Bug className="w-4 h-4 text-muted-foreground" />
+                    Report Bug
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="w-full justify-start gap-2 h-11"
+                    onClick={() => {
+                      setShowMobileMenu(false);
+                      handleOpenKodyBug();
+                    }}
+                  >
+                    <LifeBuoy className="w-4 h-4 text-muted-foreground" />
+                    Report a Kody bug
+                  </Button>
+                </div>
+              </div>
+            </>
+          }
+          bottomCta={
+            <Button
+              className="w-full h-11 gap-2"
+              onClick={() => {
+                setShowMobileMenu(false);
+                handleOpenCreate();
+              }}
+            >
+              <Plus className="w-4 h-4" />
+              New Task
+            </Button>
+          }
+        />
+
+        {/* Mobile Task Detail Sheet — only rendered on mobile */}
+        {!isDesktop && (
+          <Sheet
+            open={showMobileDetail && !!selectedTask}
+            onOpenChange={(open) => {
+              if (!open) {
+                handleTaskSelect(null);
+              }
+            }}
+          >
+            <SheetContent
+              side="right"
+              className="w-full sm:w-[400px] !p-0 !gap-0"
+              hideClose
+            >
+              <SheetHeader className="sr-only">
+                <SheetTitle>Task Details</SheetTitle>
+                <SheetDescription>
+                  View and manage task details
+                </SheetDescription>
+              </SheetHeader>
+              <TaskDetail
+                task={selectedTask}
+                onClose={() => handleTaskSelect(null)}
+                onRefresh={refetch}
+                onEditTask={setEditingTask}
+                onDuplicate={handleDuplicateTask}
+                onHideTask={(task) =>
+                  taskVisibilityMutation.mutate({ task, hidden: true })
+                }
+                onShowTask={(task) =>
+                  taskVisibilityMutation.mutate({ task, hidden: false })
+                }
+                visibilityActionPending={visibilityActionPending}
+              />
+            </SheetContent>
+          </Sheet>
+        )}
+
+        {/* Mobile chat sheet is owned by ChatRailShell in the root layout. */}
+
+        {/* Create Dialog */}
+        <CreateTaskDialog
+          open={showCreateDialog}
+          onClose={handleCloseCreate}
+          onCreated={refetch}
+          initialData={
+            duplicateSource
+              ? {
+                  title: duplicateSource.title,
+                  body: duplicateSource.body,
+                  labels: duplicateSource.labels,
+                  assignees: duplicateSource.assignees?.map((a) => a.login),
+                }
+              : undefined
+          }
+        />
+
+        {/* Edit Task Dialog */}
+        <EditTaskDialog
+          open={!!editingTask}
+          onClose={() => setEditingTask(null)}
+          task={editingTask}
+          onSaved={() => {
+            refetch();
+            setEditingTask(null);
+          }}
+        />
+
+        {/* Bug Report Dialog */}
+        <BugReportDialog
+          open={showBugDialog}
+          onClose={handleCloseBug}
+          onCreated={refetch}
+        />
+
+        {/* Kody Bug Report Dialog — files into the Kody repo, not the connected one */}
+        <KodyBugReportDialog
+          open={showKodyBugDialog}
+          onClose={handleCloseKodyBug}
+        />
+
+        {/* Keyboard Shortcuts Dialog */}
+        <KeyboardShortcutsDialog
+          open={showShortcutsHelp}
+          onClose={() => setShowShortcutsHelp(false)}
+        />
+
+      </div>
+    </ErrorBoundary>
+  );
+}

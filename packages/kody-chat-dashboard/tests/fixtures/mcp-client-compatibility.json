@@ -1,0 +1,11 @@
+{
+  "transport": "streamable-http",
+  "endpointPath": "/api/kody/mcp",
+  "authentication": {
+    "header": "Authorization",
+    "scheme": "Bearer",
+    "environmentVariable": "KODY_MCP_TOKEN"
+  },
+  "protocolVersions": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"],
+  "compatibility": "standards-compliant-client"
+}

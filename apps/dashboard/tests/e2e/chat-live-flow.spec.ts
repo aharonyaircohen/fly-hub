@@ -1,0 +1,285 @@
+/**
+ * @fileoverview E2E for the DEFAULT chat path — Kody Live. The composer is
+ *   disabled until the runner is "ready", so a turn is a two-step flow:
+ *     Boot runner → interactive/start → live transport emits `chat.ready`
+ *       → composer enables → type → interactive/append
+ *       → transport emits `chat.message` → assistant bubble renders.
+ *
+ *   Fully mocked: HTTP endpoints (interactive/start, interactive/append) at
+ *   the route level, and the Convex live event stream via the
+ *   `window.__kodyLiveTransportMock` seam (Playwright cannot intercept the
+ *   Convex WebSocket), so it runs without GitHub or a real runner. This
+ *   replaces the older chat-ui-mocked spec, which mocked the /trigger + SSE
+ *   flow the default UI no longer drives (so it could never find the
+ *   now-boot-gated composer).
+ *
+ * Runs against a deployed BASE_URL; skips without E2E_GITHUB_TOKEN and on
+ * mobile viewports.
+ *
+ * @testFramework playwright
+ * @domain e2e-mocked
+ */
+
+import { test, expect, type Page, type Route } from "@playwright/test";
+
+const BASE_URL = process.env.BASE_URL ?? "http://localhost:3333";
+const TEST_TOKEN = process.env.E2E_GITHUB_TOKEN ?? "ghp_e2e-test-placeholder";
+const TEST_REPO =
+  process.env.E2E_GITHUB_REPO ?? "https://github.com/test-owner/test-repo";
+
+function parseRepo(url: string): { owner: string; repo: string } {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.replace(/^\//, "").split("/").filter(Boolean);
+    return { owner: parts[0] ?? "test-owner", repo: parts[1] ?? "test-repo" };
+  } catch {
+    return { owner: "test-owner", repo: "test-repo" };
+  }
+}
+
+async function injectAuth(page: Page): Promise<void> {
+  const { owner, repo } = parseRepo(TEST_REPO);
+  await page.evaluate(
+    ({ auth, owner, repo }) => {
+      const repoKey = `${owner.toLowerCase()}/${repo.toLowerCase()}`;
+      localStorage.setItem("kody_auth", JSON.stringify(auth));
+      localStorage.setItem(`kody-default-chat-entry:${repoKey}`, "kody-live");
+      localStorage.removeItem(`kody-sessions-v3:${repoKey}`);
+      localStorage.removeItem("kody-sessions-v3");
+    },
+    {
+      owner,
+      repo,
+      auth: {
+        repoUrl: TEST_REPO,
+        owner,
+        repo,
+        token: TEST_TOKEN,
+        user: { login: "ui-mock-test", avatar_url: "", id: 1 },
+        loggedInAt: Date.now(),
+      },
+    },
+  );
+}
+
+/**
+ * Install the live-transport mock (before any app code runs). The runner's
+ * subscribe() gets `chat.ready` immediately; tests push further events with
+ * `pushLiveEvent`.
+ */
+async function installLiveTransportMock(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const queue: Array<{ event: string; payload: Record<string, unknown> }> =
+      [];
+    let listener:
+      | ((e: { event: string; payload: Record<string, unknown> }) => void)
+      | null = null;
+    const w = window as unknown as {
+      __kodyLiveTransportMock?: unknown;
+      __kodyPushLiveEvent?: (e: {
+        event: string;
+        payload: Record<string, unknown>;
+      }) => void;
+    };
+    w.__kodyPushLiveEvent = (e) => {
+      if (listener) listener(e);
+      else queue.push(e);
+    };
+    w.__kodyLiveTransportMock = {
+      id: "e2e-mock",
+      subscribe(
+        _sessionId: string,
+        onEvent: (e: {
+          event: string;
+          payload: Record<string, unknown>;
+        }) => void,
+      ) {
+        listener = onEvent;
+        onEvent({ event: "chat.ready", payload: {} });
+        while (queue.length) onEvent(queue.shift()!);
+        return () => {
+          listener = null;
+        };
+      },
+    };
+  });
+}
+
+async function pushLiveEvent(
+  page: Page,
+  event: { event: string; payload: Record<string, unknown> },
+): Promise<void> {
+  await page.evaluate((e) => {
+    (
+      window as unknown as {
+        __kodyPushLiveEvent?: (x: typeof e) => void;
+      }
+    ).__kodyPushLiveEvent?.(e);
+  }, event);
+}
+
+interface Harness {
+  /** Most recent interactive/append request body. */
+  appendBody: () => Record<string, unknown> | null;
+  appended: () => boolean;
+}
+
+/**
+ * Mock the live-runner endpoints and boot the runner to "ready".
+ * `appendResponder` lets a test control the append outcome (e.g. 500).
+ * `reply` is delivered via the mocked live transport once the turn is appended.
+ */
+async function bootRunner(
+  page: Page,
+  opts: {
+    appendResponder?: (route: Route) => Promise<void> | void;
+    reply?: string;
+  } = {},
+): Promise<Harness> {
+  let appended = false;
+  let delivered = false;
+  let lastBody: Record<string, unknown> | null = null;
+  const reply = opts.reply ?? "pong from the runner";
+
+  await installLiveTransportMock(page);
+  await page.route("**/api/kody/chat/interactive/start**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, sessionId: "mock-live" }),
+    }),
+  );
+  await page.route(
+    "**/api/kody/chat/interactive/append**",
+    async (route, req) => {
+      appended = true;
+      try {
+        lastBody = JSON.parse(req.postData() ?? "null");
+      } catch {
+        /* ignore */
+      }
+      if (opts.appendResponder) return opts.appendResponder(route);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+      // Deliver the runner's reply through the mocked live transport once
+      // the turn has been appended (fire-and-forget: the route must not
+      // block on page.evaluate).
+      if (!delivered) {
+        delivered = true;
+        void pushLiveEvent(page, {
+          event: "chat.message",
+          payload: { role: "assistant", content: reply },
+        }).catch(() => {});
+      }
+    },
+  );
+  await page.route("**/api/kody/secrets/FLY_API_TOKEN/value", (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "not_found" }),
+    }),
+  );
+
+  await page.goto(BASE_URL);
+  await page.waitForLoadState("domcontentloaded");
+
+  const chat = page.locator('[aria-label="Kody chat"]');
+  const composer = chat.locator("textarea").first();
+  await composer.waitFor({ state: "visible", timeout: 15_000 });
+  await expect(composer).toBeDisabled(); // idle kody-live
+  await chat.getByRole("button", { name: /Boot runner|Start/i }).click();
+  await expect(composer).toBeEnabled({ timeout: 15_000 });
+
+  return { appendBody: () => lastBody, appended: () => appended };
+}
+
+test.describe("Chat — Kody Live default flow (mocked runner)", () => {
+  test.beforeEach(async ({ page }) => {
+    if (!process.env.E2E_GITHUB_TOKEN) {
+      test.skip(true, "E2E_GITHUB_TOKEN not set");
+      return;
+    }
+    await page.goto(`${BASE_URL}/login`);
+    await page.waitForLoadState("domcontentloaded");
+    await injectAuth(page);
+  });
+
+  test("a turn round-trips: append carries the message, live transport renders the reply", async ({
+    page,
+  }) => {
+    const viewport = await page.viewportSize();
+    if ((viewport?.width ?? 1280) < 768)
+      return test.skip(true, "chat hidden on mobile");
+
+    const h = await bootRunner(page);
+    const composer = page.locator('[aria-label="Kody chat"] textarea').first();
+    await composer.fill("ping");
+    await page
+      .locator('[aria-label="Kody chat"]')
+      .getByRole("button", { name: "Send message" })
+      .click();
+
+    await expect.poll(() => h.appended(), { timeout: 10_000 }).toBe(true);
+    // Payload shape the runner reads off the session JSONL.
+    const body = h.appendBody() ?? {};
+    expect(body.taskId, "append must carry the session id").toBeTruthy();
+    expect(body.content).toBe("ping");
+
+    await expect(page.getByText("pong from the runner").first()).toBeVisible({
+      timeout: 15_000,
+    });
+  });
+
+  test("an append failure surfaces an error bubble", async ({ page }) => {
+    const viewport = await page.viewportSize();
+    if ((viewport?.width ?? 1280) < 768)
+      return test.skip(true, "chat hidden on mobile");
+
+    await bootRunner(page, {
+      appendResponder: (route) =>
+        route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "boom-append-failure" }),
+        }),
+    });
+    const composer = page.locator('[aria-label="Kody chat"] textarea').first();
+    await composer.fill("hi");
+    await page
+      .locator('[aria-label="Kody chat"]')
+      .getByRole("button", { name: "Send message" })
+      .click();
+
+    await expect(page.getByText(/boom-append-failure/).first()).toBeVisible({
+      timeout: 15_000,
+    });
+  });
+
+  test("the composer stays usable after a successful turn (no freeze)", async ({
+    page,
+  }) => {
+    const viewport = await page.viewportSize();
+    if ((viewport?.width ?? 1280) < 768)
+      return test.skip(true, "chat hidden on mobile");
+
+    await bootRunner(page);
+    const composer = page.locator('[aria-label="Kody chat"] textarea').first();
+    await composer.fill("first");
+    await page
+      .locator('[aria-label="Kody chat"]')
+      .getByRole("button", { name: "Send message" })
+      .click();
+    await expect(page.getByText("pong from the runner").first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // Still editable for the next turn.
+    await expect(composer).toBeEnabled();
+    await composer.fill("second turn");
+    await expect(composer).toHaveValue("second turn");
+  });
+});

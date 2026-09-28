@@ -1,0 +1,46 @@
+# Run Mode
+
+Run Mode controls whether Kody starts work by itself.
+
+## Modes
+
+| Mode     | Meaning                                  |
+| -------- | ---------------------------------------- |
+| `Auto`   | Kody can start this item without asking. |
+| `Manual` | Kody must wait for approval first.       |
+
+## Where users see it
+
+Show Run Mode on the item the user runs:
+
+- Loop
+- Workflow
+
+If a loop runs capabilities through a workflow, the dashboard should
+show the mode on the loop and save the needed capability permissions behind the
+scenes.
+
+Capabilities do not need their own management page for this. They receive the
+saved permission from the workflow or loop that uses them.
+
+## Storage
+
+Run Mode is repo-specific state.
+
+The dashboard stores it in the configured Kody backend:
+
+```text
+state/trust.json
+```
+
+The engine still checks capability permission at runtime.
+
+## UI rule
+
+Use icon-only controls:
+
+- lightning icon = `Auto`
+- check icon = `Manual`
+
+Keep `Auto` and `Manual` as tooltip / accessibility labels, not visible row
+text. Avoid showing trust history controls in the main row.
