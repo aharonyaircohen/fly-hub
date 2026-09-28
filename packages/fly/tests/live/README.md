@@ -1,0 +1,9 @@
+# SSH verification
+
+Normal unit tests do not create infrastructure. These opt-in tests use throwaway keys and clean up their machines and containers.
+
+- `KODY_SSH_LIVE=1 pnpm --filter @kody-ade/fly exec vitest run tests/live/ssh-machine.spec.ts` uses the currently signed-in `flyctl` account, creates disposable apps in its personal organization, and verifies native Mac OpenSSH through Fly shared IPv4/TLS. It checks root and browser users, encrypted configuration retention, and pinned-host rejection. No Fly token is included in the downloaded profile.
+- `KODY_SSH_IMAGES=1 pnpm --filter @kody-ade/fly exec vitest run tests/live/ssh-images.spec.ts` checks locally built images with the real Brain/browser startup scripts, native SSH login, installed Codex on Brain, and key stability across restart. Build `kody-browser:ssh-test` from `packages/fly/browser/Dockerfile` using the monorepo root context; build `kody-brain:ssh-test` from the engine repository's `runner/Dockerfile.brain` using its `runner` context and a valid `KODY_ENGINE_REF`. The `kody-preview:ssh-test` fixture is `node:22-alpine` plus `apk add --no-cache openssh-server`, with command `sh /etc/kody-ssh/start.sh && sleep 600`.
+- `KODY_SSH_UI_LIVE=1 PW_LOCAL=1 pnpm --filter kody-dashboard exec playwright test tests/e2e/fly-ssh-live-ui.spec.ts --project=chromium` reads the configured live test account and repository. It requires a working repository Fly credential and real machines. It does not modify that credential.
+
+Publish SSH-enabled images before deploying provisioning changes. Existing machines are not modified automatically. Custom images need OpenSSH and the `/etc/kody-ssh/start.sh` boot hook. Downloaded profiles require local placement in `~/.ssh/kody/` and one OpenSSH Include line; the download itself does not install or connect anything on the Mac.

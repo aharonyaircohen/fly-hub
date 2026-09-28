@@ -1,0 +1,86 @@
+/**
+ * @fileType model
+ * @domain runner
+ * @pattern fly-machine-model
+ *
+ * Shared dashboard model for Fly runtime machines. A machine is the runtime
+ * object; `feature` names the service that owns it.
+ */
+
+export type FlyFeature =
+  | "preview"
+  | "preview-base"
+  | "app"
+  | "runner"
+  | "brain"
+  | "browser"
+  | "builder"
+  | "other";
+
+export interface FlyMachineRow {
+  feature: FlyFeature;
+  /** Fly organization that owns this app/machine, when known. */
+  orgSlug?: string;
+  app: string;
+  machineId: string;
+  name?: string;
+  state: string;
+  region: string;
+  /** Human label, e.g. "PR #2350", "branch", "kody-runner". */
+  label: string;
+  /** "shared 2x · 4 GB" or "—" when size is unknown. */
+  sizeLabel: string;
+  /** Raw guest sizing — consumed by the activity snapshot store / cost estimate. */
+  guest?: { cpuKind?: string; cpus?: number; memoryMb?: number };
+  /** Actual image ref Fly reports for this machine, including any resolved digest. */
+  imageRef?: string;
+  createdAt?: string;
+  ageDays?: number;
+}
+
+export interface FlyInventory {
+  machines: FlyMachineRow[];
+  /** Count in a live (non-suspended/stopped) state — the ones costing CPU. */
+  running: number;
+  /** Total machines across all features. */
+  total: number;
+}
+
+export const FLY_FEATURE_TITLE: Record<FlyFeature, string> = {
+  preview: "Previews",
+  app: "Apps",
+  runner: "Fly runners",
+  brain: "Brain server",
+  browser: "Browsers",
+  builder: "Builders",
+  "preview-base": "Preview base images",
+  other: "Other",
+};
+
+export function flyFeatureLabel(feature: FlyFeature): string {
+  return FLY_FEATURE_TITLE[feature];
+}
+
+export function flyTerminalTargetLabel(target: {
+  feature?: FlyFeature;
+  app: string;
+  label?: string;
+}): string {
+  if (target.feature === "brain") return flyFeatureLabel("brain");
+  const label = target.label?.trim() || target.app;
+  return target.feature
+    ? `${flyFeatureLabel(target.feature)}: ${label}`
+    : label;
+}
+
+export function flyMachineTerminalLabel(machine: FlyMachineRow): string {
+  return flyTerminalTargetLabel(machine);
+}
+
+export function isFlyMachineRunning(state: string): boolean {
+  return state !== "suspended" && state !== "stopped" && state !== "destroyed";
+}
+
+export function isFlyTerminalCapable(feature: FlyFeature): boolean {
+  return feature === "brain";
+}

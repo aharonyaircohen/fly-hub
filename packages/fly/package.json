@@ -1,0 +1,54 @@
+{
+  "name": "@kody-ade/fly",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Kody Fly.io surface — PR/branch previews, runner pool, Fly infrastructure plugin (servers/deployments/terminal bridge), preview builder. Consumed as TS source.",
+  "exports": {
+    "./apps/source-detector": "./src/apps/source-detector.ts",
+    "./apps/access-token": "./src/apps/access-token.ts",
+    "./apps/access-ticket": "./src/apps/access-ticket.ts",
+    "./apps/lifecycle": "./src/apps/lifecycle.ts",
+    "./apps/machines-driver": "./src/apps/machines-driver.ts",
+    "./apps/builder-client": "./src/previews/builder-client.ts",
+    "./apps/config": "./src/apps/hosting-config.ts",
+    "./apps/machines-client": "./src/plugin/previews/machines-client.ts",
+    "./apps/resources-client": "./src/apps/resources-client.ts",
+    "./preview-token": "./src/preview-token.ts",
+    "./preview-environments": "./src/preview-environments.ts",
+    "./previews/*": "./src/previews/*.ts",
+    "./browsers/*": "./src/browsers/*.ts",
+    "./runners/*": "./src/runners/*.ts",
+    "./infrastructure/*": "./src/infrastructure/*.ts",
+    "./plugin": "./src/plugin/index.ts",
+    "./plugin/*": "./src/plugin/*.ts",
+    "./plugin/previews/*": "./src/plugin/previews/*.ts",
+    "./plugin/runners/*": "./src/plugin/runners/*.ts",
+    "./plugin/terminal/*": "./src/plugin/terminal/*.ts",
+    "./terminal/*": "./src/terminal/*.ts",
+    "./routes/*": "./src/routes/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "@kody-ade/base": "workspace:*",
+    "@kody-ade/engine-contracts": "workspace:*",
+    "@kody-ade/terminal": "workspace:*",
+    "@octokit/rest": "^22.0.1",
+    "fflate": "0.8.2",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "^4.0.16",
+    "@types/react": "^19.2.17",
+    "next": "16.2.9"
+  },
+  "peerDependencies": {
+    "react": "19.2.7",
+    "next": "16.2.9"
+  }
+}

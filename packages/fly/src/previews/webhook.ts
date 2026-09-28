@@ -1,0 +1,402 @@
+/**
+ * @fileType library
+ * @domain previews
+ * @pattern webhook-handler
+ * @ai-summary Translates GitHub `pull_request` and `push` events into
+ *   the right preview-lifecycle action (open/sync → build, close → destroy,
+ *   default-branch push → base-image rebuild). Trap: opt-in is implicit
+ *   — a repo with no `FLY_API_TOKEN` in its vault causes every handler
+ *   to no-op silently. If previews are mysteriously missing for a repo,
+ *   check the vault FIRST before debugging the build path.
+ *
+ * GitHub webhook entry points for the preview lifecycle. Wired from
+ * the `pull_request` event handler in
+ * app/api/webhooks/github/route.ts.
+ *
+ * Two flows:
+ *   - opened / synchronize / reopened → handlePrOpenedOrSynced
+ *       Builds + boots the preview through the dedicated builder
+ *       service.
+ *   - closed → handlePrClosed
+ *       Destroys the per-PR Fly app + machine.
+ *   - tracked branch push → handleTrackedBranchPush
+ *       Rebuilds an existing manual branch preview at the new branch HEAD.
+ *
+ * Both resolve the Fly token from the TARGET repo's vault, so each
+ * repo's previews are billed to that repo. Opt-in is implicit: when
+ * the repo's vault has no FLY_API_TOKEN, every handler returns silently.
+ */
+
+import { Octokit } from "@octokit/rest";
+
+import { resolveBackgroundToken } from "@kody-ade/base/auth/background-token";
+import { getTrackedBranchesReader } from "./tracked-branches-hook";
+import { logger } from "@kody-ade/base/logger";
+import { resolveVaultGithubToken } from "@kody-ade/base/vault/bootstrap";
+import { rebuildBaseImage } from "./base-rebuild";
+import { resolvePreviewConfigForRepo } from "./config";
+import { createPreview, destroyPreview } from "./preview-lifecycle";
+import { sweepExpiredPreviews } from "./sweep";
+import { routePreviewBuild } from "./preview-router";
+import type { ServerProviderConfig } from "../infrastructure/server-machines";
+import { listServerProviderInventory } from "../infrastructure/server-machines";
+import {
+  readServerProviderActivityFile,
+  recordServerProviderSnapshot,
+  snapshotDue,
+  snapshotFromServerProviderInventory,
+} from "../infrastructure/server-activity";
+
+/**
+ * Feature flag — `1` (default) routes per-PR preview builds through
+ * the GitHub-base / Fly-fallback router; `0` keeps the legacy
+ * always-Fly path. Lets us roll back the new path without code
+ * changes if it misbehaves in production.
+ */
+const ROUTER_ENABLED = process.env.KODY_PREVIEW_ROUTER !== "0";
+
+interface PRWebhookEvent {
+  repoFullName: string;
+  prNumber: number;
+}
+
+interface PROpenedOrSyncedEvent extends PRWebhookEvent {
+  /** Head SHA the preview should build from (event.pull_request.head.sha). */
+  ref: string;
+  /** Previous head SHA — only set on `synchronize` (event.before). When
+   *  present, the handler asks GitHub which files changed between
+   *  before..ref and skips the build if all of them are engine-only. */
+  beforeSha?: string;
+}
+
+/**
+ * Ask GitHub which files changed between two SHAs. Returns null on
+ * any failure — callers should fall back to building.
+ */
+async function fetchChangedPaths(
+  owner: string,
+  repo: string,
+  base: string,
+  head: string,
+  token: string,
+): Promise<string[] | null> {
+  try {
+    const octokit = new Octokit({ auth: token });
+    const { data } = await octokit.repos.compareCommitsWithBasehead({
+      owner,
+      repo,
+      basehead: `${base}...${head}`,
+    });
+    return (data.files ?? []).map((f) => f.filename);
+  } catch (err) {
+    logger.warn(
+      { err, owner, repo, base, head },
+      "previews.webhook: compareCommits failed; will not skip",
+    );
+    return null;
+  }
+}
+
+function queuePreviewMaintenance(
+  repoFullName: string,
+  cfg: ServerProviderConfig,
+  bg: { token: string } | null | undefined,
+  owner: string,
+  repo: string,
+): void {
+  // Opportunistic TTL sweep: each preview build is also a chance to reap
+  // expired apps for this repo. Fire-and-forget — never block or fail the
+  // build path on cleanup.
+  void sweepExpiredPreviews(repoFullName).catch((err) => {
+    logger.warn(
+      { err, repo: repoFullName },
+      "previews.webhook: opportunistic sweep failed (non-fatal)",
+    );
+  });
+
+  // Opportunistic activity snapshot — gives the activity timeline cadence
+  // without a cron (GitHub-only). Pre-check the last snapshot so we skip the
+  // full Fly inventory call when a write would be throttled anyway.
+  if (bg?.token) {
+    const oct = new Octokit({ auth: bg.token });
+    void (async () => {
+      const now = Date.now();
+      const file = await readServerProviderActivityFile(oct, owner, repo);
+      if (!snapshotDue(file, now)) return;
+      const inv = await listServerProviderInventory(cfg);
+      await recordServerProviderSnapshot(
+        oct,
+        owner,
+        repo,
+        snapshotFromServerProviderInventory(inv, now),
+      );
+    })().catch((err) =>
+      logger.warn(
+        { err, repo: repoFullName },
+        "previews.webhook: activity snapshot failed (non-fatal)",
+      ),
+    );
+  }
+}
+
+export async function handlePrOpenedOrSynced(
+  event: PROpenedOrSyncedEvent,
+): Promise<void> {
+  const [owner, repo] = event.repoFullName.split("/") as [string, string];
+  if (!owner || !repo) {
+    logger.warn({ event }, "previews.webhook: invalid repo full name");
+    return;
+  }
+
+  const cfg = await resolvePreviewConfigForRepo(owner, repo);
+  if (!cfg) {
+    // Repo isn't opted into previews (no FLY_API_TOKEN in vault). No-op.
+    return;
+  }
+
+  // Sync events with a known `before` SHA → ask GitHub which files
+  // changed and skip if the push only touches engine bookkeeping.
+  // Same parity as the Vercel `ignoreCommand` policy, but skipped at
+  // 0s instead of paying ~21s for a cancelled deploy.
+  const bg = await resolveBackgroundToken(owner, repo);
+  if (event.beforeSha && bg) {
+    const changed = await fetchChangedPaths(
+      owner,
+      repo,
+      event.beforeSha,
+      event.ref,
+      bg.token,
+    );
+    if (changed && isEngineOnlyPush(changed)) {
+      logger.info(
+        {
+          repo: event.repoFullName,
+          pr: event.prNumber,
+          ref: event.ref,
+          changedCount: changed.length,
+        },
+        "previews.webhook: skipping PR build (engine-only push)",
+      );
+      return;
+    }
+  }
+
+  queuePreviewMaintenance(event.repoFullName, cfg, bg, owner, repo);
+
+  if (ROUTER_ENABLED) {
+    try {
+      const outcome = await routePreviewBuild({
+        repoFullName: event.repoFullName,
+        prNumber: event.prNumber,
+        ref: event.ref,
+      });
+      logger.info(
+        {
+          repo: event.repoFullName,
+          pr: event.prNumber,
+          runner: outcome.runner,
+          reason: outcome.reason,
+          url: outcome.flyUrl,
+        },
+        "previews.webhook: build routed",
+      );
+    } catch (err) {
+      logger.warn(
+        { err, repo: event.repoFullName, pr: event.prNumber },
+        "previews.webhook: router failed (non-fatal)",
+      );
+    }
+    return;
+  }
+
+  try {
+    const info = await createPreview(
+      {
+        repo: event.repoFullName,
+        pr: event.prNumber,
+        ref: event.ref,
+        // Reuse the already-resolved token (App preferred, vault fallback)
+        // so the downstream vault read uses the same auth that already
+        // worked for the Fly-config + compare-commits calls above.
+        githubToken: bg?.token,
+      },
+      cfg,
+    );
+    logger.info(
+      {
+        repo: event.repoFullName,
+        pr: event.prNumber,
+        url: info.url,
+        builderMachineId: info.builderMachineId,
+      },
+      "previews.webhook: builder dispatched",
+    );
+  } catch (err) {
+    logger.warn(
+      { err, repo: event.repoFullName, pr: event.prNumber },
+      "previews.webhook: create failed (non-fatal)",
+    );
+  }
+}
+
+interface DefaultBranchPushEvent {
+  repoFullName: string;
+  /** Head SHA of the push (event.head_commit.id or after). */
+  ref: string;
+  /** Paths changed in the push, used to skip engine-only commits. */
+  changedPaths: string[];
+}
+
+interface TrackedBranchPushEvent {
+  repoFullName: string;
+  branch: string;
+  /** Head SHA of the push (event.head_commit.id or after). */
+  ref: string;
+  /** Paths changed in the push, used to skip engine-only commits. */
+  changedPaths: string[];
+}
+
+/**
+ * Skip base rebuilds when a release push only updates the changelog.
+ */
+function isEngineOnlyPush(changedPaths: string[]): boolean {
+  if (changedPaths.length === 0) return false;
+  return changedPaths.every((p) => p === "CHANGELOG.md");
+}
+
+export async function handleDefaultBranchPush(
+  event: DefaultBranchPushEvent,
+): Promise<void> {
+  const [owner, repo] = event.repoFullName.split("/") as [string, string];
+  if (!owner || !repo) {
+    logger.warn({ event }, "previews.webhook: invalid repo full name");
+    return;
+  }
+
+  if (isEngineOnlyPush(event.changedPaths)) {
+    logger.info(
+      { repo: event.repoFullName, ref: event.ref },
+      "previews.webhook: skipping base rebuild (engine-only push)",
+    );
+    return;
+  }
+
+  const cfg = await resolvePreviewConfigForRepo(owner, repo);
+  if (!cfg) {
+    // Repo isn't opted into previews (no FLY_API_TOKEN in vault). No-op.
+    return;
+  }
+
+  // Base-image builds mirror to GHCR so PR previews can inherit warm layers.
+  // GitHub App installation tokens are right for repo automation, but they
+  // cannot publish the user's container package. Prefer the repo vault PAT
+  // here because it can carry `write:packages`; fall back to the App token so
+  // the base build can still run, even if the GHCR mirror is unavailable.
+  const bg = await resolveBackgroundToken(owner, repo);
+  const packageToken = await resolveVaultGithubToken(owner, repo);
+
+  await rebuildBaseImage({
+    repo: event.repoFullName,
+    ref: event.ref,
+    cfg,
+    githubToken: packageToken ?? bg?.token,
+  });
+}
+
+export async function handleTrackedBranchPush(
+  event: TrackedBranchPushEvent,
+): Promise<void> {
+  const [owner, repo] = event.repoFullName.split("/") as [string, string];
+  if (!owner || !repo || !event.branch) {
+    logger.warn({ event }, "previews.webhook: invalid branch push event");
+    return;
+  }
+
+  if (isEngineOnlyPush(event.changedPaths)) {
+    logger.info(
+      { repo: event.repoFullName, branch: event.branch, ref: event.ref },
+      "previews.webhook: skipping branch preview build (engine-only push)",
+    );
+    return;
+  }
+
+  const bg = await resolveBackgroundToken(owner, repo);
+  if (!bg) {
+    logger.warn(
+      { repo: event.repoFullName, branch: event.branch },
+      "previews.webhook: no background token for tracked branch preview",
+    );
+    return;
+  }
+
+  const readTrackedBranches = getTrackedBranchesReader();
+  if (!readTrackedBranches) {
+    logger.warn(
+      { repo: event.repoFullName, branch: event.branch },
+      "previews.webhook: no tracked-branches reader registered (host wiring missing) — skipping branch preview",
+    );
+    return;
+  }
+  const octokit = new Octokit({ auth: bg.token });
+  const trackedBranches = await readTrackedBranches(octokit, owner, repo);
+  if (!trackedBranches.includes(event.branch)) return;
+
+  const cfg = await resolvePreviewConfigForRepo(owner, repo);
+  if (!cfg) {
+    // Repo isn't opted into previews (no FLY_API_TOKEN in vault). No-op.
+    return;
+  }
+
+  queuePreviewMaintenance(event.repoFullName, cfg, bg, owner, repo);
+
+  try {
+    const info = await createPreview(
+      {
+        repo: event.repoFullName,
+        branch: event.branch,
+        ref: event.ref,
+        githubToken: bg.token,
+      },
+      cfg,
+    );
+    logger.info(
+      {
+        repo: event.repoFullName,
+        branch: event.branch,
+        ref: event.ref,
+        url: info.url,
+        builderMachineId: info.builderMachineId,
+      },
+      "previews.webhook: tracked branch build dispatched",
+    );
+  } catch (err) {
+    logger.warn(
+      { err, repo: event.repoFullName, branch: event.branch },
+      "previews.webhook: tracked branch build failed (non-fatal)",
+    );
+  }
+}
+
+export async function handlePrClosed(event: PRWebhookEvent): Promise<void> {
+  const [owner, repo] = event.repoFullName.split("/") as [string, string];
+  if (!owner || !repo) {
+    logger.warn({ event }, "previews.webhook: invalid repo full name");
+    return;
+  }
+
+  const cfg = await resolvePreviewConfigForRepo(owner, repo);
+  if (!cfg) return;
+
+  try {
+    await destroyPreview({ repo: event.repoFullName, pr: event.prNumber }, cfg);
+    logger.info(
+      { repo: event.repoFullName, pr: event.prNumber },
+      "previews.webhook: destroyed",
+    );
+  } catch (err) {
+    logger.warn(
+      { err, repo: event.repoFullName, pr: event.prNumber },
+      "previews.webhook: destroy failed (non-fatal)",
+    );
+  }
+}

@@ -1,0 +1,254 @@
+/**
+ * @fileType library
+ * @domain runners
+ * @pattern fly-spawn-context
+ * @ai-summary Resolves Fly spawn context from request headers + vault: auth,
+ *   repo, secrets, flyToken, perf tier, and engine model. Every
+ *   spawner route calls this — routes stay thin. Errors return {ok:false}
+ *   so callers decide how to respond. account is the verified PAT owner
+ *   (stable per person), not the incidental connected-repo owner.
+ *
+ * Routes stay thin — they call resolveFlyContext, then spawnRunner with a
+ * target-specific run request plus transport details like ingest URL.
+ */
+
+import type { NextRequest } from "next/server";
+import type { Octokit } from "@octokit/rest";
+
+import {
+  getRequestAuth,
+  getUserOctokit,
+  resolveActorFromToken,
+} from "@kody-ade/base/auth";
+import { logger } from "@kody-ade/base/logger";
+import { getEngineConfig } from "@kody-ade/base/engine/config";
+import type { FlyPreviewConfig } from "../previews/machines-client";
+import { readVault } from "@kody-ade/base/vault/store";
+import { loadChatModels } from "@kody-ade/base/variables/load-chat-models";
+import {
+  engineModelSpec,
+  engineRuntimeModelConfig,
+  pickEngineDefaultModel,
+  type EngineRuntimeModelConfig,
+} from "@kody-ade/base/variables/models";
+import type { PerfTier } from "./fly";
+
+/**
+ * Resolved Fly spawn context. Pass straight through to spawnRunner —
+ * the fields are named to match SpawnRunnerInput.
+ */
+export interface FlyContext {
+  owner: string;
+  repo: string;
+  /**
+   * The authenticated GitHub account behind the PAT (verified via
+   * `GET /user`), NOT the connected repo's owner. Stable per person across
+   * repos/orgs — use this to key per-user infra like the Brain app, so it
+   * doesn't get pinned to whatever repo happened to be connected at setup.
+   * Falls back to `owner` if the lookup fails.
+   */
+  account: string;
+  /**
+   * The engine model spec from the connected repo's kody.config.json
+   * (`agent.model`, e.g. "minimax/MiniMax-M3"). Resolved here so
+   * a repo-less Brain can be told its model at provision time via the MODEL
+   * env var, instead of reading it from a boot repo at runtime. undefined if
+   * the repo has no config.
+   */
+  engineModel: string | undefined;
+  /**
+   * Full model runtime config from Dashboard /models. Brain Fly passes this
+   * through to the engine so provider routing uses the user's selected
+   * protocol/baseURL/secret name instead of guessing from `agent.model`.
+   */
+  engineModelConfig: EngineRuntimeModelConfig | undefined;
+  githubToken: string;
+  octokit: Octokit;
+  /** Optional Store repo/ref headers carried by dashboard auth. */
+  storeRepoUrl?: string;
+  storeRef?: string;
+  /** Secrets the engine reads at runtime; FLY_API_TOKEN is already extracted. */
+  allSecrets: Record<string, string>;
+  flyToken: string | undefined;
+  flyOrgSlug: string;
+  flyDefaultRegion: string;
+  perfTier: PerfTier | undefined;
+  providerTokenSource: "repo-vault" | null;
+}
+
+/**
+ * Result type for resolveFlyContext. The error case carries enough info
+ * for the route to build a NextResponse without leaking helper internals.
+ */
+export type FlyContextResult =
+  | { ok: true; context: FlyContext }
+  | { ok: false; error: string; status: number };
+
+export function flyConfigFromContext(
+  context: FlyContext,
+): FlyPreviewConfig | null {
+  if (!context.flyToken) return null;
+  return {
+    token: context.flyToken,
+    orgSlug: context.flyOrgSlug,
+    defaultRegion: context.flyDefaultRegion,
+  };
+}
+
+/**
+ * Decrypt the per-repo secrets vault and flatten it into the env shape
+ * the engine expects (mirrors what `toJSON(secrets)` returns on GH
+ * Actions). Returns {} when the vault is missing, empty, or unreadable —
+ * the engine will surface its own auth error downstream.
+ */
+async function buildAllSecretsFromVault(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+): Promise<Record<string, string>> {
+  try {
+    const { doc } = await readVault(octokit, owner, repo);
+    const out: Record<string, string> = {};
+    for (const [name, entry] of Object.entries(doc.secrets)) {
+      if (entry?.value) out[name] = entry.value;
+    }
+    return out;
+  } catch (err) {
+    logger.warn({ err, owner, repo }, "fly-context: vault read failed");
+    return {};
+  }
+}
+
+/**
+ * Build a Fly spawn context from the incoming request. Reads:
+ *   - x-kody-token / x-kody-owner / x-kody-repo headers (header auth)
+ *   - per-repo secrets vault (model keys + FLY_API_TOKEN)
+ *   - x-kody-fly-perf header (perf tier, optional)
+ *
+ * Errors flow back as {ok:false} so the caller decides how to respond.
+ * Pass `repoOverride` to operate on a repo other than the one in
+ * header auth (chat uses this for KODY_CHAT_WORKFLOW_REPO).
+ */
+export async function resolveFlyContext(
+  req: NextRequest,
+  opts?: { repoOverride?: { owner: string; repo: string } },
+): Promise<FlyContextResult> {
+  const headerAuth = getRequestAuth(req);
+  const octokit = await getUserOctokit(req);
+  const githubToken =
+    headerAuth?.token ??
+    process.env.KODY_BOT_TOKEN ??
+    process.env.GITHUB_TOKEN ??
+    "";
+
+  if (!octokit || !githubToken) {
+    return {
+      ok: false,
+      error: "No GitHub token available",
+      status: 503,
+    };
+  }
+
+  // Default to the connected repo (where issues + workflows live). Chat
+  // routes can override to point at the engine repo when configured.
+  const owner = opts?.repoOverride?.owner ?? headerAuth?.owner ?? "";
+  const repo = opts?.repoOverride?.repo ?? headerAuth?.repo ?? "";
+  if (!owner || !repo) {
+    return {
+      ok: false,
+      error: "Repo not resolved (missing x-kody-owner/x-kody-repo headers)",
+      status: 400,
+    };
+  }
+
+  // Verified account behind the PAT — the stable per-person key (the repo
+  // `owner` above is incidental: it's just whatever repo is connected).
+  // Cached for 1h inside resolveActorFromToken; falls back to owner.
+  const actor = await resolveActorFromToken(githubToken);
+  const account = actor?.login ?? owner;
+
+  // Prefer Dashboard /models. It carries the full user-owned runtime shape
+  // (protocol/baseURL/secret name), while kody.config.json only has a flat
+  // legacy provider/model string.
+  let engineModel: string | undefined;
+  let engineModelConfig: EngineRuntimeModelConfig | undefined;
+  try {
+    const models = await loadChatModels(req);
+    const engineDefault = pickEngineDefaultModel(models);
+    if (engineDefault) {
+      engineModel = engineModelSpec(engineDefault);
+      engineModelConfig = engineRuntimeModelConfig(engineDefault);
+    }
+  } catch (err) {
+    logger.warn(
+      { err, owner, repo },
+      "fly-context: dashboard model resolve failed",
+    );
+  }
+  if (!engineModel) {
+    try {
+      const { config } = await getEngineConfig(octokit, owner, repo);
+      engineModel = config.agent?.model;
+    } catch (err) {
+      logger.warn(
+        { err, owner, repo },
+        "fly-context: engine model fallback resolve failed",
+      );
+    }
+  }
+
+  const allSecrets = await buildAllSecretsFromVault(octokit, owner, repo);
+
+  // Fly runs outside GitHub Actions, so it cannot receive the dashboard's
+  // canonical conversation-store credentials through `toJSON(secrets)`.
+  // Server-owned values override vault entries so all dashboard runners use
+  // the same backend as the UI that launched them.
+  const convexUrl =
+    process.env.CONVEX_URL?.trim() ||
+    process.env.NEXT_PUBLIC_CONVEX_URL?.trim();
+  const serviceKey = process.env.KODY_SERVICE_KEY?.trim();
+  if (convexUrl) allSecrets.CONVEX_URL = convexUrl;
+  if (serviceKey) allSecrets.KODY_SERVICE_KEY = serviceKey;
+
+  // Fly Machines API token. The connected repo vault is the only authority:
+  // a server-wide token must never expose another Fly account to this repo.
+  const vaultFlyToken = allSecrets.FLY_API_TOKEN?.trim() || undefined;
+  if ("FLY_API_TOKEN" in allSecrets) delete allSecrets.FLY_API_TOKEN;
+  const flyToken = vaultFlyToken;
+  const providerTokenSource = vaultFlyToken ? ("repo-vault" as const) : null;
+  const flyOrgSlug =
+    allSecrets.FLY_ORG_SLUG?.trim() ||
+    process.env.FLY_ORG_SLUG?.trim() ||
+    "personal";
+  const flyDefaultRegion =
+    allSecrets.FLY_DEFAULT_REGION?.trim() ||
+    process.env.FLY_DEFAULT_REGION?.trim() ||
+    "fra";
+
+  const rawPerf = req.headers.get("x-kody-fly-perf");
+  const perfTier: PerfTier | undefined =
+    rawPerf === "low" || rawPerf === "medium" || rawPerf === "high"
+      ? rawPerf
+      : undefined;
+
+  return {
+    ok: true,
+    context: {
+      owner,
+      repo,
+      account,
+      engineModel,
+      engineModelConfig,
+      githubToken,
+      octokit,
+      storeRepoUrl: headerAuth?.storeRepoUrl,
+      storeRef: headerAuth?.storeRef,
+      allSecrets,
+      providerTokenSource,
+      flyToken,
+      flyOrgSlug,
+      flyDefaultRegion,
+      perfTier,
+    },
+  };
+}

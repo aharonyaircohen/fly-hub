@@ -1,0 +1,11 @@
+{
+  "name": "kody-browser-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@novnc/novnc": "1.7.0",
+    "playwright-core": "1.61.1",
+    "tsx": "4.20.5",
+    "ws": "8.21.3"
+  }
+}
