@@ -8,6 +8,8 @@ Dashboard: [flyhub.thedigitalreality.app](https://flyhub.thedigitalreality.app)
 
 Enter a Fly API token. Fly Hub verifies it with Fly and remembers it in an encrypted, HttpOnly browser cookie for 30 days. Use **Disconnect** to remove it. The token stays on the server during machine requests. The connected Fly organization determines which machines are visible.
 
+The header offers **System**, **Light**, and **Dark** themes. Use the arrow icon there to disconnect. The two dashboard pages are **Machines** and **History**.
+
 ## Machines
 
 Create an SSH machine with a name, size, region, and **Sleep when idle** choice. From Machines, download its SSH ZIP, suspend it, resume it, or destroy it. The dashboard also lists existing Kody-managed Fly machines available to the token.

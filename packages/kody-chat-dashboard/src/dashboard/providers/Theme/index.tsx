@@ -67,6 +67,18 @@ export const ThemeProvider = ({ children }: { children: React.ReactNode }) => {
     setThemeState(themeToSet);
   }, []);
 
+  useEffect(() => {
+    const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const followSystemTheme = () => {
+      if (window.localStorage.getItem(themeLocalStorageKey) !== null) return;
+      const nextTheme = getImplicitPreference() ?? defaultTheme;
+      document.documentElement.setAttribute("data-theme", nextTheme);
+      setThemeState(nextTheme);
+    };
+    systemTheme.addEventListener("change", followSystemTheme);
+    return () => systemTheme.removeEventListener("change", followSystemTheme);
+  }, []);
+
   return <ThemeContext value={{ setTheme, theme }}>{children}</ThemeContext>;
 };
 

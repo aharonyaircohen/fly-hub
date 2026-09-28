@@ -3,12 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { History, ServerCog, Settings2, Workflow } from "lucide-react";
+import { History, LogOut, ServerCog, Workflow } from "lucide-react";
+import { ThemeSelector } from "@dashboard/providers/Theme/ThemeSelector";
 
 const flyItems = [
   { href: "/fly/machines", label: "Machines", icon: ServerCog },
   { href: "/fly/history", label: "History", icon: History },
-  { href: "/fly/config", label: "Settings", icon: Settings2 },
 ] as const;
 
 type Session = { connected: boolean; orgSlug: string | null };
@@ -76,6 +76,7 @@ export function FlyShell({ children }: { children: ReactNode }) {
             <span className="fly-hub__brand-mark"><Workflow size={19} strokeWidth={2.4} /></span>
             <span>Fly Hub</span>
           </Link>
+          <ThemeSelector />
         </header>
         <main className="fly-hub__content flex min-h-[70vh] items-center justify-center px-6">
           <form onSubmit={(event) => void signIn(event)} className="w-full max-w-md rounded-xl border bg-card p-8 shadow-sm">
@@ -118,8 +119,9 @@ export function FlyShell({ children }: { children: ReactNode }) {
         <header className="fly-hub__topbar">
           <div className="fly-hub__topbar-title"><span className="fly-hub__eyebrow">Control plane</span><span>Machine management</span></div>
           <div className="fly-hub__topbar-actions">
-            <span className="text-sm text-muted-foreground">{session.orgSlug}</span>
-            <button type="button" disabled={busy} className="fly-hub__sign-out" onClick={() => void signOut()}>Disconnect</button>
+            <span className="fly-hub__org text-sm text-muted-foreground">{session.orgSlug}</span>
+            <ThemeSelector />
+            <button type="button" disabled={busy} className="fly-hub__sign-out" aria-label="Disconnect" title="Disconnect" onClick={() => void signOut()}><LogOut size={17} /></button>
           </div>
         </header>
         <main className="fly-hub__content">{children}</main>

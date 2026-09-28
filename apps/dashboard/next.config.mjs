@@ -18,6 +18,11 @@ const nextConfig = {
         permanent: false,
       },
       {
+        source: "/fly/config",
+        destination: "/fly/machines",
+        permanent: false,
+      },
+      {
         source: "/cms/:path*",
         destination: "/content/entries/:path*",
         permanent: false,

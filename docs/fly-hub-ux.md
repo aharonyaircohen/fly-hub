@@ -2,7 +2,7 @@
 
 ## User goal
 
-Create a machine, get its SSH configuration, see live machines, and review recent activity. These four jobs drive the navigation: **Machines**, **History**, and **Settings**.
+Create a machine, get its SSH configuration, see live machines, and review recent activity. These four jobs drive two navigation pages: **Machines** and **History**.
 
 ## Findings in the copied Kody dashboard
 
@@ -14,14 +14,14 @@ Create a machine, get its SSH configuration, see live machines, and review recen
 | Manage live machines | The page repeated details in many cards and exposed Kody subsystem language. | Use a searchable machine list and one detail panel with status, region, size, SSH, and lifecycle controls. |
 | Review history | The copied page showed sampled uptime and estimated cost, which looked more exact than the data supported. | Show recent machine events reported by Fly, with clear timestamps and status. |
 
-`MasterDetailShell` remains the machine page structure. `PageShell` provides the History and Settings pages.
+`MasterDetailShell` remains the machine page structure. `PageShell` provides the History page.
 
 ## Current flow
 
 1. Enter a Fly token. The connected organization appears in the header.
 2. Open **Machines** to create, inspect, refresh, suspend, resume, download SSH settings, or destroy a machine.
 3. Open **History** to see recent Fly events for machines that still exist.
-4. Open **Settings** for the token connection and **Disconnect** to remove the remembered session.
+4. Use the header theme selector for System, Light, or Dark, and the Disconnect icon to remove the remembered session.
 
 ## Limits
 

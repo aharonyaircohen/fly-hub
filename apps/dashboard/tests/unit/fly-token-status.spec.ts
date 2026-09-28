@@ -19,7 +19,7 @@ describe("Fly Hub connection", () => {
   it("has only the user-facing machine pages in navigation", () => {
     expect(shell).toContain('href: "/fly/machines"');
     expect(shell).toContain('href: "/fly/history"');
-    expect(shell).toContain('href: "/fly/config"');
+    expect(shell).not.toContain('href: "/fly/config"');
     expect(shell).not.toContain('href: "/fly/previews"');
   });
 });

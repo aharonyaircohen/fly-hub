@@ -94,10 +94,9 @@ test("History shows Fly machine events", async ({ page }) => {
   await expect(page.getByRole("article").getByText("Suspended")).toBeVisible();
 });
 
-test("Settings explains remembered Fly connection", async ({ page }) => {
+test("old Settings URL opens Machines", async ({ page }) => {
   await connected(page);
   await page.goto("/fly/config");
-  await expect(page.getByRole("heading", { name: "Fly connection" })).toBeVisible();
-  await expect(page.getByText(/remembered on this browser for 30 days/)).toBeVisible();
-  await expect(page.getByText(/Advanced Kody runner settings/)).toHaveCount(0);
+  await expect(page).toHaveURL(/\/fly\/machines$/);
+  await expect(page.getByRole("navigation", { name: "Fly pages" }).getByRole("link", { name: "Settings" })).toHaveCount(0);
 });
