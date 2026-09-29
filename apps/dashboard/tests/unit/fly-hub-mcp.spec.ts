@@ -4,6 +4,7 @@ import {
   issueFlyHubMcpGrant,
   readFlyHubMcpGrant,
 } from "../../src/dashboard/lib/fly-hub-mcp-auth";
+import { issueFlyHubEveTask } from "../../src/dashboard/lib/fly-hub-eve-task";
 import { POST as issueToken } from "../../app/api/fly-hub/mcp-token/route";
 import { POST as callMcp } from "../../app/api/fly-hub/mcp/route";
 import { setHubSession } from "@kody-ade/fly/hub/session";
@@ -28,6 +29,7 @@ vi.mock("@kody-ade/fly/machines/managed", () => ({
   })),
 }));
 vi.mock("@kody-ade/fly/hub/app-source", () => ({
+  flyHubAppName: vi.fn(() => "flyhub-app-acme-site-123456789abc"),
   inspectPublicGitHubApp: vi.fn(async () => ({
     repository: "acme/site",
     name: "site",
@@ -259,5 +261,33 @@ describe("Fly Hub MCP", () => {
     expect((await callMcp(request("tools/list"))).status).toBe(400);
     const discovered = await (await callMcp(request("server/discover"))).json();
     expect(discovered.result.protocolVersion).toBe("2026-07-28");
+  });
+
+  it("limits an Eve deployment task to its pinned repository tools", async () => {
+    const token = issueFlyHubEveTask({
+      token: "fly-secret",
+      orgSlug: "personal",
+      repository: "acme/site",
+      commitSha: "a".repeat(40),
+    });
+    const listed = await (
+      await callMcp(mcpRequest(token, "tools/list"))
+    ).json();
+    expect(
+      listed.result.tools.map((tool: { name: string }) => tool.name),
+    ).toEqual([
+      "flyhub_task_inspect",
+      "flyhub_task_deploy",
+      "flyhub_task_status",
+    ]);
+    const inspected = await (
+      await callMcp(mcpRequest(token, "tools/call", "flyhub_task_inspect"))
+    ).json();
+    expect(inspected.result.structuredContent.commitSha).toBe("a".repeat(40));
+    expect(JSON.stringify(inspected)).not.toContain("fly-secret");
+    const blocked = await (
+      await callMcp(mcpRequest(token, "tools/call", "flyhub_list_machines"))
+    ).json();
+    expect(blocked.error.code).toBe(-32602);
   });
 });

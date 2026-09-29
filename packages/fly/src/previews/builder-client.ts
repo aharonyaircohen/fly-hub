@@ -108,12 +108,14 @@ export interface SpawnAppBuilderInput {
     runtimeEnv?: Record<string, string>;
     generatedSecretNames?: string[];
     storagePath?: string;
+    customDockerfile?: string;
     verification?: { path: string; expectedStatus: number };
   };
   exposure: "private" | "public";
   tokenHashes: string[];
   flyHubPasswordHash?: string;
   flyHubName?: string;
+  flyHubAppPasswordEnv?: string;
   builderHostApp?: string;
   builderImage?: string;
   runtimeSecrets: Record<string, string>;
@@ -139,6 +141,7 @@ export interface SpawnAppBuilderInput {
 
 export interface PreviewBuilderStatus {
   state: "building" | "failed";
+  error?: string;
   machineId?: string;
   machineState?: string;
   createdAt?: string;
@@ -273,9 +276,29 @@ export async function getPreviewBuilderStatus(
     const latest = machines[0];
     if (!latest) return null;
     const now = Date.now();
+    const state = isReusableBuilder(latest, now) ? "building" : "failed";
+    let error: string | undefined;
+    if (state === "failed" && latest.id) {
+      const detail = await fetch(
+        `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(hostApp)}/machines/${encodeURIComponent(latest.id)}/metadata`,
+        {
+          headers: builderAuthHeaders(token),
+          signal: AbortSignal.timeout(BUILDER_MAINTENANCE_TIMEOUT_MS),
+        },
+      ).then(
+        async (response) =>
+          response.ok
+            ? ((await response.json()) as Record<string, unknown>)
+            : null,
+        () => null,
+      );
+      if (typeof detail?.flyhub_last_error === "string")
+        error = detail.flyhub_last_error.slice(-8_000);
+    }
 
     return {
-      state: isReusableBuilder(latest, now) ? "building" : "failed",
+      state,
+      error,
       machineId: latest.id,
       machineState: latest.state,
       createdAt: latest.created_at,
@@ -509,6 +532,9 @@ export async function spawnAppBuilder(
           ? {
               FLY_HUB_PASSWORD_HASH: input.flyHubPasswordHash,
               FLY_HUB_NAME: input.flyHubName ?? input.appName,
+              ...(input.flyHubAppPasswordEnv
+                ? { FLY_HUB_APP_PASSWORD_ENV: input.flyHubAppPasswordEnv }
+                : {}),
             }
           : {}),
         FLY_API_TOKEN: input.flyToken,

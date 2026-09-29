@@ -33,6 +33,10 @@ const exists = async (path: string) =>
     () => true,
     () => false,
   );
+let recentOutput = "";
+function rememberOutput(value: string) {
+  recentOutput = (recentOutput + value).slice(-12_000);
+}
 function run(
   command: string,
   args: string[],
@@ -42,7 +46,17 @@ function run(
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
-      stdio: [options.input ? "pipe" : "ignore", "inherit", "inherit"],
+      stdio: [options.input ? "pipe" : "ignore", "pipe", "pipe"],
+    });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      const value = chunk.toString();
+      rememberOutput(value);
+      process.stdout.write(value);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const value = chunk.toString();
+      rememberOutput(value);
+      process.stderr.write(value);
     });
     if (options.input) {
       child.stdin?.end(options.input);
@@ -64,11 +78,16 @@ function runOutput(
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
-      stdio: ["ignore", "pipe", "inherit"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
     child.stdout.on("data", (chunk: Buffer) => {
       output += chunk.toString();
+      rememberOutput(chunk.toString());
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      rememberOutput(chunk.toString());
+      process.stderr.write(chunk);
     });
     child.on("error", reject);
     child.on("exit", (code) =>
@@ -87,6 +106,7 @@ type Plan = {
   apiPort?: number;
   imageRef?: string;
   dockerfilePath?: string;
+  customDockerfile?: string;
   dockerBuildTarget?: string;
   runtimeEnv?: Record<string, string>;
   generatedSecretNames?: string[];
@@ -169,6 +189,7 @@ async function main() {
   const tokenHashes = process.env.KODY_APP_TOKEN_HASHES ?? "";
   const flyHubPasswordHash = process.env.FLY_HUB_PASSWORD_HASH ?? "";
   const flyHubName = process.env.FLY_HUB_NAME ?? "";
+  const flyHubAppPasswordEnv = process.env.FLY_HUB_APP_PASSWORD_ENV ?? "";
   const secrets = JSON.parse(
     process.env.APP_RUNTIME_SECRETS_JSON ?? "{}",
   ) as Record<string, string>;
@@ -195,6 +216,13 @@ async function main() {
     await run("git", ["checkout", ref], { cwd });
   }
   const appRoot = resolve(cwd, plan.rootDirectory || ".");
+  if (plan.customDockerfile) {
+    plan.dockerfilePath = "Dockerfile.flyhub-agent";
+    await writeFile(
+      resolve(appRoot, plan.dockerfilePath),
+      plan.customDockerfile,
+    );
+  }
   const generatedDockerfile =
     !(await exists(resolve(appRoot, "Dockerfile"))) &&
     !plan.dockerfilePath &&
@@ -383,6 +411,9 @@ async function main() {
                   FLY_HUB_NAME: flyHubName,
                   FLY_HUB_SOURCE_REPO: repo,
                   FLY_HUB_COMMIT_SHA: ref,
+                  ...(flyHubAppPasswordEnv
+                    ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
+                    : {}),
                 }
               : {}),
             KODY_APP_REPOSITORY: process.env.KODY_APP_REPOSITORY ?? "",
@@ -486,6 +517,9 @@ async function main() {
                       FLY_HUB_NAME: flyHubName,
                       FLY_HUB_SOURCE_REPO: repo,
                       FLY_HUB_COMMIT_SHA: ref,
+                      ...(flyHubAppPasswordEnv
+                        ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
+                        : {}),
                     }
                   : {}),
                 KODY_APP_REPOSITORY: process.env.KODY_APP_REPOSITORY ?? "",
@@ -530,6 +564,46 @@ async function main() {
 }
 main().catch(async (error) => {
   console.error("[app-builder] failed", error);
+  try {
+    const app = process.env.FLY_APP_NAME;
+    const machine = process.env.FLY_MACHINE_ID;
+    const token = process.env.FLY_API_TOKEN;
+    if (app && machine && token) {
+      let detail =
+        `${error instanceof Error ? error.message : String(error)}\n${recentOutput}`.slice(
+          -8_000,
+        );
+      let secrets: Record<string, string> = {};
+      try {
+        secrets = JSON.parse(
+          process.env.APP_RUNTIME_SECRETS_JSON ?? "{}",
+        ) as Record<string, string>;
+      } catch {
+        /* no secret list */
+      }
+      for (const value of [
+        token,
+        process.env.GITHUB_TOKEN,
+        ...Object.values(secrets),
+      ])
+        if (value && value.length >= 8)
+          detail = detail.replaceAll(value, "[redacted]");
+      await fetch(
+        `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/flyhub_last_error`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ value: detail }),
+          signal: AbortSignal.timeout(5_000),
+        },
+      );
+    }
+  } catch (metadataError) {
+    console.error("[app-builder] could not save failure detail", metadataError);
+  }
   await notify("failed", {
     errorCode:
       error instanceof Error &&
