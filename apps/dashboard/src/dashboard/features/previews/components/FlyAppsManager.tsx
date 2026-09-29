@@ -542,6 +542,8 @@ export function FlyAppsManager() {
                       ? "Build failed. Eve can inspect the failure and retry."
                       : agentApp.buildStatus === "building"
                         ? "Building app…"
+                        : agentState === "completed"
+                          ? "Eve finished without starting a build. Review its explanation below."
                         : "Waiting for Eve to start the build."}
                 </p>
                 {agentApp.password && (
