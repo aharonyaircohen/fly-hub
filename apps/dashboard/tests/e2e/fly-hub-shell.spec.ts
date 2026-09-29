@@ -77,3 +77,20 @@ test("shows invalid Fly token error", async ({ page }) => {
   await page.getByRole("button", { name: "Connect Fly" }).click();
   await expect(page.getByText("Fly could not verify this token.")).toBeVisible();
 });
+
+test("settings content scrolls when the viewport is short", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 500 });
+  await page.route("**/api/fly-hub/session", (route) =>
+    route.fulfill({ json: { connected: true, orgSlug: "personal" } }),
+  );
+  await page.goto("/fly/settings");
+  const content = page.locator(".fly-hub__content");
+  await expect(page.getByRole("heading", { name: "MCP connection" })).toBeVisible();
+  const dimensions = await content.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  await content.evaluate((element) => element.scrollTo(0, element.scrollHeight));
+  await expect(page.getByRole("button", { name: "Create credential" })).toBeInViewport();
+});

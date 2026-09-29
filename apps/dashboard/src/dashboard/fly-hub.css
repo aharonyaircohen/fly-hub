@@ -169,7 +169,8 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .fly-hub--signed-out .fly-hub__content { height: calc(100dvh - 76px); }
 
