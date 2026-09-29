@@ -96,6 +96,9 @@ export interface MachineDiagnostic {
     status: string;
     source: string;
     timestamp: number;
+    exitCode?: number;
+    oomKilled?: boolean;
+    requestedStop?: boolean;
   }>;
   imageDigest?: string;
 }
@@ -505,6 +508,13 @@ export async function getMachineDiagnostic(
       status?: string;
       source?: string;
       timestamp?: number;
+      request?: {
+        exit_event?: {
+          exit_code?: number;
+          oom_killed?: boolean;
+          requested_stop?: boolean;
+        };
+      };
     }>;
     image_ref?: { digest?: string };
   };
@@ -516,6 +526,15 @@ export async function getMachineDiagnostic(
       status: event.status ?? "unknown",
       source: event.source ?? "unknown",
       timestamp: event.timestamp ?? 0,
+      ...(typeof event.request?.exit_event?.exit_code === "number"
+        ? { exitCode: event.request.exit_event.exit_code }
+        : {}),
+      ...(typeof event.request?.exit_event?.oom_killed === "boolean"
+        ? { oomKilled: event.request.exit_event.oom_killed }
+        : {}),
+      ...(typeof event.request?.exit_event?.requested_stop === "boolean"
+        ? { requestedStop: event.request.exit_event.requested_stop }
+        : {}),
     })),
     imageDigest: data.image_ref?.digest,
   };

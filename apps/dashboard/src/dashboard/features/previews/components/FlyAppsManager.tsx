@@ -65,9 +65,10 @@ type EveApp = {
   appCredential: { name: string; password: string } | null;
 };
 type RunProgress = { stage: string; explanation: string };
-type RunMachine = { id: string; state: string; region?: string };
+type MachineEvent = { type: string; status: string; source: string; timestamp: number; exitCode?: number; oomKilled?: boolean };
+type RunMachine = { id: string; state: string; region?: string; reason?: string | null; events?: MachineEvent[] };
 type RunMachines = {
-  builder: { id: string | null; state: string | null; startedAt: string | null; error: string | null } | null;
+  builder: { id: string | null; state: string | null; startedAt: string | null; error: string | null; reason?: string | null; events?: MachineEvent[] } | null;
   gateway: RunMachine | null;
   runtime: RunMachine | null;
 };
@@ -91,6 +92,27 @@ type EveInputRequest = {
   question?: string;
   options?: Array<{ id: string; label?: string; description?: string }>;
 };
+
+function MachineEvents({ machines }: { machines: RunMachines }) {
+  const groups = [
+    { label: "Builder", events: machines.builder?.events ?? [] },
+    { label: "App runtime", events: machines.runtime?.events ?? [] },
+    { label: "Password gateway", events: machines.gateway?.events ?? [] },
+  ];
+  if (!groups.some((group) => group.events.length)) return null;
+  return <details className="text-xs"><summary className="cursor-pointer">Recent Fly machine events</summary>
+    {groups.filter((group) => group.events.length).map((group) => <div key={group.label} className="mt-2">
+      <strong>{group.label}</strong>
+      <ul className="list-disc pl-5">
+        {group.events.map((event, index) => <li key={`${event.timestamp}-${index}`}>
+          {new Date(event.timestamp).toLocaleString()}: {event.type} · {event.status} · {event.source}
+          {typeof event.exitCode === "number" ? ` · exit ${event.exitCode}` : ""}
+          {event.oomKilled ? " · out of memory" : ""}
+        </li>)}
+      </ul>
+    </div>)}
+  </details>;
+}
 
 async function json<T>(response: Response): Promise<T> {
   const body = (await response.json().catch(() => ({}))) as T & {
@@ -148,7 +170,11 @@ export function FlyAppsManager() {
     try {
       const saved = JSON.parse(window.localStorage.getItem(runHistoryKey) || "[]") as RunSummary[];
       const valid = Array.isArray(saved)
-        ? saved.filter((run) => typeof run.handle === "string" && typeof run.url === "string").slice(0, 12)
+        ? saved.filter((run) =>
+            typeof run.handle === "string" &&
+            typeof run.url === "string" &&
+            (typeof run.startedAt !== "number" || Date.now() - run.startedAt < 30 * 24 * 60 * 60 * 1_000)
+          ).slice(0, 12)
         : [];
       const old = window.sessionStorage.getItem("flyhub:eve-app-task");
       const legacy = old ? JSON.parse(old) as { handle?: string; url?: string } : null;
@@ -652,12 +678,16 @@ export function FlyAppsManager() {
                 <p><strong>Fly builder:</strong> {agentMachines?.builder
                   ? `${agentMachines.builder.state ?? "unknown"} (${agentMachines.builder.id ?? "unknown ID"})`
                   : "Not created"}</p>
+                {agentMachines?.builder?.reason && <p className="text-muted-foreground">{agentMachines.builder.reason}</p>}
                 <p><strong>App runtime machine:</strong> {agentMachines?.runtime
                   ? `${agentMachines.runtime.state} (${agentMachines.runtime.id})`
                   : "Not created"}</p>
+                {agentMachines?.runtime?.reason && <p className="text-muted-foreground">{agentMachines.runtime.reason}</p>}
                 <p><strong>Password gateway machine:</strong> {agentMachines?.gateway
                   ? `${agentMachines.gateway.state} (${agentMachines.gateway.id})`
                   : "Not created"}</p>
+                {agentMachines?.gateway?.reason && <p className="text-muted-foreground">{agentMachines.gateway.reason}</p>}
+                {agentMachines && <MachineEvents machines={agentMachines} />}
               </div>
             )}
             {agentFailure && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-destructive/10 p-3 text-destructive">{agentFailure}</pre>}

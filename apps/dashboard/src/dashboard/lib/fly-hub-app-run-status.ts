@@ -12,6 +12,28 @@ export type AppRunStage =
   | "finished_without_app"
   | "cancelled";
 
+export type FlyMachineEvent = {
+  type: string;
+  status: string;
+  source: string;
+  timestamp: number;
+  exitCode?: number;
+  oomKilled?: boolean;
+  requestedStop?: boolean;
+};
+
+export function machineEventReason(event?: FlyMachineEvent): string | null {
+  if (!event) return null;
+  if (event.type === "suspension" && event.source === "proxy")
+    return "Fly paused this idle machine. It can wake when requested.";
+  if (event.type === "exit") {
+    if (event.oomKilled) return "The machine ran out of memory.";
+    if (event.exitCode === 0) return "The machine's process finished successfully.";
+    if (typeof event.exitCode === "number") return `The machine's process exited with code ${event.exitCode}.`;
+  }
+  return `${event.type} (${event.status}) by ${event.source}.`;
+}
+
 export function appRunStage(input: {
   eveStatus: string;
   builderState?: "building" | "failed" | null;
@@ -20,6 +42,10 @@ export function appRunStage(input: {
   eveError?: string | null;
   ready: boolean;
 }): { stage: AppRunStage; explanation: string } {
+  if (input.ready && input.builderState === "failed")
+    return { stage: "build_failed", explanation: "The latest build failed. A previously deployed app is still responding." };
+  if (input.ready && input.eveStatus === "failed")
+    return { stage: "eve_failed", explanation: "Eve stopped, but a previously deployed app is still responding. The new run did not complete." };
   if (input.ready)
     return { stage: "ready", explanation: "The app is responding and its password gate is ready." };
   if (input.gatewayState === "suspended")

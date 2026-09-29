@@ -15,10 +15,12 @@ import {
 } from "@dashboard/lib/fly-hub-eve-task";
 import {
   appRunStage,
+  machineEventReason,
   runtimeAppName,
+  type FlyMachineEvent,
 } from "@dashboard/lib/fly-hub-app-run-status";
 import { getPreviewBuilderStatus } from "@kody-ade/fly/apps/builder-client";
-import { listMachines } from "@kody-ade/fly/apps/machines-client";
+import { getMachineDiagnostic, listMachines } from "@kody-ade/fly/apps/machines-client";
 
 export const runtime = "nodejs";
 const privateHeaders = { "Cache-Control": "no-store, private" };
@@ -327,6 +329,26 @@ export async function GET(req: NextRequest) {
         (machine) => machine.config?.env?.FLY_HUB_PASSWORD_HASH,
       );
       const runtimeMachine = runtimeMachines[0];
+      const builderHost = process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder";
+      const [builderDiagnostic, gatewayDiagnostic, runtimeDiagnostic] = await Promise.all([
+        pendingStatus?.machineId
+          ? getMachineDiagnostic(builderHost, pendingStatus.machineId, auth.cfg).catch(() => null)
+          : null,
+        gateway
+          ? getMachineDiagnostic(appName, gateway.id, auth.cfg).catch(() => null)
+          : null,
+        runtimeMachine
+          ? getMachineDiagnostic(runtimeAppName(appName), runtimeMachine.id, auth.cfg).catch(() => null)
+          : null,
+      ]);
+      const eventReason = (state: string | null | undefined, events: FlyMachineEvent[] | undefined) => {
+        const event = state === "suspended"
+          ? events?.find((item) => item.type === "suspension")
+          : state === "stopped"
+            ? events?.find((item) => item.type === "exit")
+            : events?.[0];
+        return machineEventReason(event);
+      };
       const ready =
         gateway?.state === "started"
           ? await fetch(`https://${appName}.fly.dev/_kody/health`, {
@@ -375,16 +397,26 @@ export async function GET(req: NextRequest) {
                   state: pendingStatus.machineState ?? null,
                   startedAt: pendingStatus.createdAt ?? null,
                   error: pendingStatus.error ?? null,
+                  reason: eventReason(pendingStatus.machineState, builderDiagnostic?.events),
+                  events: builderDiagnostic?.events.slice(0, 5) ?? [],
                 }
               : null,
             gateway: gateway
-              ? { id: gateway.id, state: gateway.state, region: gateway.region }
+              ? {
+                  id: gateway.id,
+                  state: gateway.state,
+                  region: gateway.region,
+                  reason: eventReason(gateway.state, gatewayDiagnostic?.events),
+                  events: gatewayDiagnostic?.events.slice(0, 5) ?? [],
+                }
               : null,
             runtime: runtimeMachine
               ? {
                   id: runtimeMachine.id,
                   state: runtimeMachine.state,
                   region: runtimeMachine.region,
+                  reason: eventReason(runtimeMachine.state, runtimeDiagnostic?.events),
+                  events: runtimeDiagnostic?.events.slice(0, 5) ?? [],
                 }
               : null,
           },
