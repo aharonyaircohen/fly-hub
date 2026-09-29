@@ -139,7 +139,7 @@ export function FlyAppsManager() {
           mode?: string;
           app?: EveApp;
           result: unknown;
-          error?: string | null;
+          error?: string | { message?: string } | null;
           plan?: EvePlan | null;
           planError?: string | null;
           inputRequests?: Record<string, EveInputRequest> | null;
@@ -161,7 +161,9 @@ export function FlyAppsManager() {
         setAgentAuthorization(data.authorization ?? null);
         if (data.status === "failed")
           setError(
-            data.error || "Eve could not complete this deployment plan.",
+            typeof data.error === "string"
+              ? data.error
+              : data.error?.message || "Eve could not complete app setup.",
           );
       } catch (cause) {
         if (active)
@@ -506,7 +508,7 @@ export function FlyAppsManager() {
                   ? "Eve finished. Review the app status and its instructions below."
                   : "Plan complete. Review the setup and missing inputs below."
                 : agentState === "failed"
-                  ? "Eve could not finish the plan."
+                  ? "Eve could not finish app setup."
                   : agentState === "input_required"
                     ? "Eve needs your answer to continue."
                     : agentState === "authorization_required"
@@ -614,7 +616,7 @@ export function FlyAppsManager() {
                   }
                   onClick={() => void answerEve()}
                 >
-                  {busy === "answer" ? "Sending…" : "Continue Eve plan"}
+                  {busy === "answer" ? "Sending…" : "Continue setup"}
                 </Button>
               )}
             {agentState === "authorization_required" &&
