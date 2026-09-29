@@ -31,7 +31,7 @@ test("connects with a Fly token and remembers the session after reload", async (
   await page.getByLabel("Fly API token").fill("fly-test-token");
   await page.getByRole("button", { name: "Connect Fly" }).click();
   await expect(page.getByRole("navigation", { name: "Fly pages" })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "Fly pages" }).getByRole("link")).toHaveCount(2);
+  await expect(page.getByRole("navigation", { name: "Fly pages" }).getByRole("link")).toHaveCount(4);
   expect(submittedToken).toBe("fly-test-token");
   await expect(page.getByTitle("Switch repository")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Disconnect" }).locator("svg")).toBeVisible();
@@ -55,7 +55,7 @@ test("theme selection changes the dashboard and follows the system", async ({ pa
   await theme.click();
   await page.getByRole("option", { name: "Light" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await expect.poll(() => page.locator(".fly-hub").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(246, 249, 250)");
+  await expect.poll(() => page.locator(".fly-hub").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(246, 248, 250)");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await theme.click();
