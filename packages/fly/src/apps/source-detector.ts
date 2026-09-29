@@ -148,6 +148,13 @@ export function detectAppSource(input: SourceInput): AppSourcePlan {
     return {
       kind: "dockerfile",
       rootDirectory,
+      ...(!exposed?.[0] && /^CMD\s*\[\s*\]\s*$/m.test(dockerfile)
+        ? {
+            questions: [
+              "This Dockerfile has no default web command or HTTP port. Which service should run, and on what port?",
+            ],
+          }
+        : {}),
       ...(exposed?.[0] ? { port: exposed[0] } : {}),
       ...(exposed?.[1] && /\bAPI_URL\b/.test(dockerfile)
         ? { apiPort: exposed[1] }

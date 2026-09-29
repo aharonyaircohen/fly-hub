@@ -86,15 +86,18 @@ export async function inspectPublicGitHubApp(input: {
   if (repository.private)
     throw new Error("The first version supports public repositories only.");
   const branch = await githubJson<{
-    commit: { sha: string; tree: { sha: string } };
+    commit: { sha: string; commit: { tree: { sha: string } } };
   }>(
     `/repos/${owner}/${repo}/branches/${encodeURIComponent(repository.default_branch)}`,
   );
-  const commitSha = branch.commit.sha;
+  const commitSha = branch.commit?.sha;
+  const treeSha = branch.commit?.commit?.tree?.sha;
+  if (!commitSha || !treeSha)
+    throw new Error("GitHub did not return the repository's current commit.");
   const tree = await githubJson<{
     truncated: boolean;
     tree: Array<{ path: string; type: string; size?: number }>;
-  }>(`/repos/${owner}/${repo}/git/trees/${branch.commit.tree.sha}?recursive=1`);
+  }>(`/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`);
   if (tree.truncated)
     throw new Error("Repository is too large to inspect automatically.");
   const files = tree.tree
@@ -108,6 +111,7 @@ export async function inspectPublicGitHubApp(input: {
       (item) =>
         item.type === "blob" &&
         item.path.startsWith(prefix) &&
+        !item.path.slice(prefix.length).includes("/") &&
         (item.size ?? 0) <= 262_144 &&
         relevant.test(item.path),
     )
