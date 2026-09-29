@@ -31,11 +31,14 @@ export function issueFlyHubEveTask(input: {
   return `fheve_${encrypt(JSON.stringify(task))}`;
 }
 
-export function readFlyHubEveTask(value: string): FlyHubEveTask | null {
+export function readFlyHubEveTask(
+  value: string,
+  options: { allowExpired?: boolean } = {},
+): FlyHubEveTask | null {
   if (!value.startsWith("fheve_") || value.length > 4_096) return null;
   try {
     const task = taskSchema.parse(JSON.parse(decrypt(value.slice(6))));
-    return task.expiresAt > Date.now() ? task : null;
+    return options.allowExpired || task.expiresAt > Date.now() ? task : null;
   } catch {
     return null;
   }

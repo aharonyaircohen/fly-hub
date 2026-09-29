@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@kody-ade/base/ui/button";
 import { Input } from "@kody-ade/base/ui/input";
 
@@ -64,9 +64,29 @@ type EveApp = {
   password: string | null;
   appCredential: { name: string; password: string } | null;
 };
+type RunProgress = { stage: string; explanation: string };
+type RunMachine = { id: string; state: string; region?: string };
+type RunMachines = {
+  builder: { id: string | null; state: string | null; startedAt: string | null; error: string | null } | null;
+  gateway: RunMachine | null;
+  runtime: RunMachine | null;
+};
+type RunSummary = {
+  handle: string;
+  url: string;
+  prompt?: string;
+  runId: string;
+  startedAt: number | null;
+  status: string;
+  mode?: string;
+  progress?: RunProgress;
+  checkedAt?: number;
+};
+const runHistoryKey = "flyhub:eve-app-runs";
 type EveInputRequest = {
   requestId: string;
   kind?: string;
+  toolName?: string;
   prompt?: string;
   question?: string;
   options?: Array<{ id: string; label?: string; description?: string }>;
@@ -85,6 +105,14 @@ export function FlyAppsManager() {
   const [url, setUrl] = useState("");
   const [setupPrompt, setSetupPrompt] = useState("");
   const [agentHandle, setAgentHandle] = useState<string | null>(null);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [agentRunId, setAgentRunId] = useState<string | null>(null);
+  const [agentStartedAt, setAgentStartedAt] = useState<number | null>(null);
+  const [agentCheckedAt, setAgentCheckedAt] = useState<number | null>(null);
+  const [agentProgress, setAgentProgress] = useState<RunProgress | null>(null);
+  const [agentMachines, setAgentMachines] = useState<RunMachines | null>(null);
+  const [agentFailure, setAgentFailure] = useState<string | null>(null);
+  const [agentRefresh, setAgentRefresh] = useState(0);
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentMode, setAgentMode] = useState<string | null>(null);
   const [agentApp, setAgentApp] = useState<EveApp | null>(null);
@@ -98,6 +126,7 @@ export function FlyAppsManager() {
     Record<string, EveInputRequest>
   >({});
   const [agentAnswers, setAgentAnswers] = useState<Record<string, string>>({});
+  const resumedApproval = useRef<string | null>(null);
   const [agentAuthorization, setAgentAuthorization] = useState<unknown>(null);
   const [rootDirectory, setRootDirectory] = useState("");
   const [plan, setPlan] = useState<Plan | null>(null);
@@ -116,16 +145,25 @@ export function FlyAppsManager() {
   const pendingAppName = pending?.appName;
 
   useEffect(() => {
-    const saved = window.sessionStorage.getItem("flyhub:eve-app-task");
-    if (!saved) return;
     try {
-      const value = JSON.parse(saved) as { handle?: string; url?: string };
-      if (value.handle && value.url) {
-        setAgentHandle(value.handle);
-        setUrl(value.url);
+      const saved = JSON.parse(window.localStorage.getItem(runHistoryKey) || "[]") as RunSummary[];
+      const valid = Array.isArray(saved)
+        ? saved.filter((run) => typeof run.handle === "string" && typeof run.url === "string").slice(0, 12)
+        : [];
+      const old = window.sessionStorage.getItem("flyhub:eve-app-task");
+      const legacy = old ? JSON.parse(old) as { handle?: string; url?: string } : null;
+      if (legacy?.handle && legacy.url && !valid.some((run) => run.handle === legacy.handle))
+        valid.unshift({ handle: legacy.handle, url: legacy.url, runId: "", startedAt: null, status: "unknown" });
+      window.sessionStorage.removeItem("flyhub:eve-app-task");
+      const recent = valid.slice(0, 12);
+      setRuns(recent);
+      window.localStorage.setItem(runHistoryKey, JSON.stringify(recent));
+      if (recent[0]) {
+        setAgentHandle(recent[0].handle);
+        setUrl(recent[0].url);
       }
     } catch {
-      window.sessionStorage.removeItem("flyhub:eve-app-task");
+      window.localStorage.removeItem(runHistoryKey);
     }
   }, []);
 
@@ -137,6 +175,11 @@ export function FlyAppsManager() {
         const data = await json<{
           status: string;
           mode?: string;
+          runId?: string;
+          startedAt?: number | null;
+          checkedAt?: number;
+          progress?: RunProgress;
+          machines?: RunMachines;
           app?: EveApp;
           result: unknown;
           error?: string | { message?: string } | null;
@@ -153,18 +196,37 @@ export function FlyAppsManager() {
         if (!active) return;
         setAgentState(data.status);
         setAgentMode(data.mode ?? null);
+        setAgentRunId(data.runId ?? null);
+        setAgentStartedAt(data.startedAt ?? null);
+        setAgentCheckedAt(data.checkedAt ?? Date.now());
+        setAgentProgress(data.progress ?? null);
+        setAgentMachines(data.machines ?? null);
         setAgentApp(data.app ?? null);
         if (data.result != null) setAgentResult(data.result);
         if (data.plan) setAgentPlan(data.plan);
         if (data.planError) setAgentPlanError(data.planError);
         setAgentInputs(data.inputRequests ?? {});
         setAgentAuthorization(data.authorization ?? null);
-        if (data.status === "failed")
-          setError(
-            typeof data.error === "string"
-              ? data.error
-              : data.error?.message || "Eve could not complete app setup.",
-          );
+        setAgentFailure(data.status === "failed" || data.status === "unavailable"
+          ? typeof data.error === "string"
+            ? data.error
+            : data.error?.message || "Eve status is unavailable."
+          : null);
+        setRuns((current) => {
+          const next = current.map((run) => run.handle === agentHandle
+            ? {
+                ...run,
+                runId: data.runId ?? run.runId,
+                startedAt: data.startedAt ?? run.startedAt,
+                status: data.status,
+                mode: data.mode ?? run.mode,
+                progress: data.progress,
+                checkedAt: data.checkedAt ?? Date.now(),
+              }
+            : run);
+          window.localStorage.setItem(runHistoryKey, JSON.stringify(next));
+          return next;
+        });
       } catch (cause) {
         if (active)
           setError(
@@ -175,20 +237,36 @@ export function FlyAppsManager() {
       }
     }
     void refresh();
-    const timer = window.setInterval(() => {
-      if (
-        (agentState !== "completed" &&
-          agentState !== "failed" &&
-          agentState !== "cancelled") ||
-        (agentState === "completed" && agentApp?.buildStatus === "building")
-      )
-        void refresh();
-    }, 5_000);
+    const timer = window.setInterval(() => void refresh(), 10_000);
     return () => {
       active = false;
       window.clearInterval(timer);
     };
-  }, [agentHandle, agentState, agentApp?.buildStatus]);
+  }, [agentHandle, agentRefresh]);
+
+  useEffect(() => {
+    if (!agentHandle || agentState !== "input_required") return;
+    const requests = Object.values(agentInputs);
+    if (!requests.length || !requests.every((request) =>
+      request.kind === "tool-approval" &&
+      (request.toolName?.endsWith("flyhub_task_deploy") ||
+        request.prompt?.includes("flyhub__flyhub_task_deploy"))
+    )) return;
+    const key = `${agentHandle}:${requests.map((request) => request.requestId).join(",")}`;
+    if (resumedApproval.current === key) return;
+    resumedApproval.current = key;
+    void fetch("/api/fly-hub/apps/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "resume_deploy", handle: agentHandle }),
+    }).then((response) => json<{ ok: boolean }>(response)).then(() => {
+      setAgentState("working");
+      setAgentInputs({});
+      setAgentRefresh((value) => value + 1);
+    }).catch((cause) => {
+      setError(cause instanceof Error ? cause.message : "Could not continue Eve deployment.");
+    });
+  }, [agentHandle, agentState, agentInputs]);
 
   useEffect(() => {
     let active = true;
@@ -248,10 +326,17 @@ export function FlyAppsManager() {
     }
   }
 
-  async function planWithEve() {
+  async function planWithEve(repository = url, prompt = setupPrompt) {
     setBusy("agent");
     setError("");
+    setUrl(repository);
     setAgentHandle(null);
+    setAgentRunId(null);
+    setAgentStartedAt(null);
+    setAgentCheckedAt(null);
+    setAgentProgress(null);
+    setAgentMachines(null);
+    setAgentFailure(null);
     setAgentState(null);
     setAgentMode(null);
     setAgentApp(null);
@@ -268,20 +353,34 @@ export function FlyAppsManager() {
         handle: string;
         status: string;
         mode?: string;
+        runId: string;
+        startedAt: number;
         commitSha?: string;
         requiredSecretNames?: string[];
       }>(
         await fetch("/api/fly-hub/apps/agent", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url, prompt: setupPrompt }),
+          body: JSON.stringify({ url: repository, prompt }),
         }),
       );
       setAgentHandle(result.handle);
-      window.sessionStorage.setItem(
-        "flyhub:eve-app-task",
-        JSON.stringify({ handle: result.handle, url }),
-      );
+      const nextRun: RunSummary = {
+        handle: result.handle,
+        url: repository,
+        prompt,
+        runId: result.runId,
+        startedAt: result.startedAt,
+        status: result.status,
+        mode: result.mode,
+      };
+      setRuns((current) => {
+        const next = [nextRun, ...current.filter((run) => run.handle !== result.handle)].slice(0, 12);
+        window.localStorage.setItem(runHistoryKey, JSON.stringify(next));
+        return next;
+      });
+      setAgentRunId(result.runId);
+      setAgentStartedAt(result.startedAt);
       setAgentState(result.status);
       setAgentMode(result.mode ?? null);
       setAgentCommitSha(result.commitSha ?? null);
@@ -380,6 +479,25 @@ export function FlyAppsManager() {
     }
   }
 
+  function selectRun(run: RunSummary) {
+    setAgentHandle(run.handle);
+    setUrl(run.url);
+    setSetupPrompt(run.prompt ?? "");
+    setAgentState(run.status);
+    setAgentMode(run.mode ?? null);
+    setAgentRunId(run.runId || null);
+    setAgentStartedAt(run.startedAt);
+    setAgentProgress(run.progress ?? null);
+    setAgentCheckedAt(run.checkedAt ?? null);
+    setAgentMachines(null);
+    setAgentApp(null);
+    setAgentFailure(null);
+    setAgentResult(null);
+    setAgentInputs({});
+    setError("");
+    setAgentRefresh((value) => value + 1);
+  }
+
   async function resetPassword(appName: string) {
     setBusy(appName);
     setError("");
@@ -428,12 +546,35 @@ export function FlyAppsManager() {
           gets one shared password.
         </p>
       </header>
+      {runs.length > 0 && (
+        <section className="rounded-xl border bg-card p-6 space-y-3">
+          <h2 className="text-lg font-semibold">Recent setup runs</h2>
+          <p className="text-sm text-muted-foreground">Select a run to see its current Eve, build, and machine status. Runs stay here in this browser for up to 30 days.</p>
+          <div className="space-y-2">
+            {runs.map((run) => (
+              <button
+                key={run.handle}
+                type="button"
+                onClick={() => selectRun(run)}
+                className={`w-full rounded-md border p-3 text-left text-sm ${agentHandle === run.handle ? "border-primary bg-muted/40" : "bg-background"}`}
+              >
+                <span className="block font-medium break-all">{run.url}</span>
+                <span className="block text-muted-foreground">
+                  {run.progress?.stage.replaceAll("_", " ") ?? run.status}
+                  {run.startedAt ? ` · ${new Date(run.startedAt).toLocaleString()}` : ""}
+                  {run.runId ? ` · ${run.runId}` : ""}
+                </span>
+                {run.checkedAt && <span className="block text-xs text-muted-foreground">Checked {new Date(run.checkedAt).toLocaleString()}</span>}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
       <section className="rounded-xl border bg-card p-6 space-y-4">
         <div>
           <h2 className="text-lg font-semibold">Deploy from GitHub</h2>
           <p className="text-sm text-muted-foreground">
-            Fly Hub checks how to build and run the repository before
-            deployment.
+            Eve inspects, builds, and deploys the repository when you start setup. Follow its progress below.
           </p>
         </div>
         <label className="block text-sm font-medium">
@@ -484,7 +625,7 @@ export function FlyAppsManager() {
             disabled={!url.trim() || busy !== null}
             onClick={() => void planWithEve()}
           >
-            {busy === "agent" ? "Starting Eve…" : "Set up with Eve"}
+            {busy === "agent" ? "Starting Eve…" : "Set up and deploy"}
           </Button>
           <Button
             type="button"
@@ -497,11 +638,29 @@ export function FlyAppsManager() {
         </div>
         {agentHandle && (
           <div className="rounded-lg border bg-muted/30 p-4 space-y-2 text-sm">
-            <h3 className="font-semibold">
-              {agentMode === "deployment"
-                ? "Eve app setup"
-                : "Eve deployment plan"}
-            </h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-semibold">{agentMode === "deployment" ? "Run status" : "Eve deployment plan"}</h3>
+              <Button type="button" variant="outline" disabled={busy !== null} onClick={() => setAgentRefresh((value) => value + 1)}>Refresh status</Button>
+            </div>
+            {agentRunId && <p><strong>Run ID:</strong> <code className="select-all">{agentRunId}</code></p>}
+            {agentStartedAt && <p><strong>Started:</strong> {new Date(agentStartedAt).toLocaleString()}</p>}
+            {agentCheckedAt && <p className="text-muted-foreground">Last checked: {new Date(agentCheckedAt).toLocaleString()}</p>}
+            {agentProgress && <p role="status"><strong>{agentProgress.stage.replaceAll("_", " ")}:</strong> {agentProgress.explanation}</p>}
+            {agentMode === "deployment" && (
+              <div className="rounded-md border bg-background p-3 space-y-1">
+                <p><strong>Eve:</strong> {agentState ?? "checking"}</p>
+                <p><strong>Fly builder:</strong> {agentMachines?.builder
+                  ? `${agentMachines.builder.state ?? "unknown"} (${agentMachines.builder.id ?? "unknown ID"})`
+                  : "Not created"}</p>
+                <p><strong>App runtime machine:</strong> {agentMachines?.runtime
+                  ? `${agentMachines.runtime.state} (${agentMachines.runtime.id})`
+                  : "Not created"}</p>
+                <p><strong>Password gateway machine:</strong> {agentMachines?.gateway
+                  ? `${agentMachines.gateway.state} (${agentMachines.gateway.id})`
+                  : "Not created"}</p>
+              </div>
+            )}
+            {agentFailure && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-destructive/10 p-3 text-destructive">{agentFailure}</pre>}
             <p role="status">
               {agentState === "completed"
                 ? agentMode === "deployment"
@@ -519,33 +678,18 @@ export function FlyAppsManager() {
             </p>
             {agentApp && (
               <div className="rounded-md border bg-background p-3 space-y-2">
-                <p>
-                  <strong>App:</strong>{" "}
-                  <a
-                    href={agentApp.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline"
-                  >
-                    {agentApp.url}
-                  </a>
-                </p>
+                {agentMachines?.gateway && (
+                  <p>
+                    <strong>App:</strong>{" "}
+                    <a href={agentApp.url} target="_blank" rel="noopener noreferrer" className="underline">{agentApp.url}</a>
+                  </p>
+                )}
                 {agentApp.buildStatus === "failed" && agentApp.buildError && (
                   <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">
                     {agentApp.buildError}
                   </pre>
                 )}
-                <p>
-                  {agentApp.ready
-                    ? "App ready"
-                    : agentApp.buildStatus === "failed"
-                      ? "Build failed. Eve can inspect the failure and retry."
-                      : agentApp.buildStatus === "building"
-                        ? "Building app…"
-                        : agentState === "completed"
-                          ? "Eve finished without starting a build. Review its explanation below."
-                        : "Waiting for Eve to start the build."}
-                </p>
+                <p>{agentProgress?.explanation ?? "Checking app status…"}</p>
                 {agentApp.password && (
                   <p>
                     <strong>Fly Hub password:</strong>{" "}
@@ -565,6 +709,11 @@ export function FlyAppsManager() {
                   </p>
                 )}
               </div>
+            )}
+            {agentMode === "deployment" && ["eve_failed", "build_failed", "finished_without_app", "cancelled"].includes(agentProgress?.stage ?? "") && (
+              <Button type="button" variant="outline" disabled={busy !== null} onClick={() => void planWithEve(url, setupPrompt)}>
+                {busy === "agent" ? "Starting…" : "Retry this repository"}
+              </Button>
             )}
             {agentState === "input_required" &&
               Object.values(agentInputs).map((request) => (

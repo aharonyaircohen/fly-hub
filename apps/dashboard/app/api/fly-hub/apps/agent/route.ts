@@ -13,8 +13,12 @@ import {
   issueFlyHubEveTask,
   readFlyHubEveTask,
 } from "@dashboard/lib/fly-hub-eve-task";
+import {
+  appRunStage,
+  runtimeAppName,
+} from "@dashboard/lib/fly-hub-app-run-status";
 import { getPreviewBuilderStatus } from "@kody-ade/fly/apps/builder-client";
-import { appExists, listMachines } from "@kody-ade/fly/apps/machines-client";
+import { listMachines } from "@kody-ade/fly/apps/machines-client";
 
 export const runtime = "nodejs";
 const privateHeaders = { "Cache-Control": "no-store, private" };
@@ -29,6 +33,7 @@ type Handle = {
   commitSha?: string;
   requiredSecretNames?: string[];
   taskGrant?: string;
+  startedAt?: number;
   expiresAt: number;
 };
 
@@ -44,6 +49,9 @@ export function readEvePlanHandle(value: string, orgSlug: string): Handle {
     (handle.commitSha !== undefined &&
       (typeof handle.commitSha !== "string" ||
         !/^[a-f0-9]{40}$/.test(handle.commitSha))) ||
+    (handle.startedAt !== undefined &&
+      (typeof handle.startedAt !== "number" ||
+        !Number.isFinite(handle.startedAt))) ||
     typeof handle.expiresAt !== "number" ||
     handle.expiresAt <= Date.now()
   )
@@ -66,6 +74,45 @@ export async function POST(req: NextRequest) {
     url?: unknown;
     prompt?: unknown;
   } | null;
+  if (body?.action === "resume_deploy") {
+    try {
+      if (typeof body.handle !== "string" || body.handle.length > 4_096)
+        throw new Error("Invalid Eve run.");
+      const handle = readEvePlanHandle(body.handle, auth.cfg.orgSlug);
+      if (!handle.taskGrant || !readFlyHubEveTask(handle.taskGrant))
+        throw new Error("This deployment run has expired. Start a new run.");
+      const current = await callEveStudioTool("agent_get", {
+        agentId: handle.agentId,
+        invocationId: handle.invocationId,
+      });
+      if (current.status !== "input_required" || !current.inputRequests || typeof current.inputRequests !== "object")
+        throw new Error("Eve is not waiting for a deployment tool.");
+      const requests = Object.values(current.inputRequests as Record<string, {
+        requestId?: string;
+        kind?: string;
+        toolName?: string;
+        prompt?: string;
+        options?: Array<{ id?: string }>;
+      }>);
+      if (!requests.length || requests.some((request) =>
+        request.kind !== "tool-approval" ||
+        !request.requestId ||
+        !(request.toolName?.endsWith("flyhub_task_deploy") ||
+          request.prompt?.includes("flyhub__flyhub_task_deploy")) ||
+        !request.options?.some((option) => option.id === "approve")
+      )) throw new Error("Eve needs a different answer. Review the pending request.");
+      await callEveStudioTool("agent_update", {
+        agentId: handle.agentId,
+        invocationId: handle.invocationId,
+        responses: requests.map((request) => ({ requestId: request.requestId, optionId: "approve" })),
+      });
+      return NextResponse.json({ ok: true }, { headers: privateHeaders });
+    } catch (error) {
+      return NextResponse.json({
+        error: error instanceof Error ? error.message : "Could not continue Eve.",
+      }, { status: 400, headers: privateHeaders });
+    }
+  }
   if (body?.action === "answer") {
     try {
       if (
@@ -173,7 +220,7 @@ export async function POST(req: NextRequest) {
       `Pinned commit: ${commitSha}`,
       `User request: ${body.prompt?.trim() || "Deploy the main web interface and explain how to use it."}`,
       `Initial file inspection: ${JSON.stringify(inspected)}`,
-      "Use the Fly Hub connection tools flyhub_task_inspect, flyhub_task_deploy, and flyhub_task_status. Do not return a JSON plan for Fly Hub to interpret. Inspect repository files in your sandbox as needed. If the repo's Dockerfile is unsuitable, provide a replacement Dockerfile to the deploy tool. Call flyhub_task_deploy when ready: Eve automatically pauses that tool call for the user's Approve/Cancel choice. Do not ask for approval in your final text. Poll status until ready or failed. If failed, inspect the error and retry with corrected build instructions. Never print the Fly Hub connection token or any generated password; Fly Hub displays passwords directly to the user. Do not ask for secret values in Eve chat. If a missing third-party API key is essential, tell the user its environment variable name. Finish with the app URL, how to log in, what works, and any remaining setup.",
+      "Use the Fly Hub connection tools flyhub_task_inspect, flyhub_task_deploy, and flyhub_task_status. The user already authorized deployment by choosing Set up and deploy for this repository. Do not ask for another deployment approval in your text or through ask_question. Do not return a JSON plan for Fly Hub to interpret. Inspect repository files in your sandbox as needed. If the repo's Dockerfile is unsuitable, provide a replacement Dockerfile to the deploy tool. Call flyhub_task_deploy when ready, then poll status until ready or failed. If failed, inspect the error and retry with corrected build instructions. Never print the Fly Hub connection token or any generated password; Fly Hub displays passwords directly to the user. Do not ask for secret values in Eve chat. If a missing third-party API key is essential, tell the user its environment variable name. Finish with the app URL, how to log in, what works, and any remaining setup.",
     ].join("\n\n");
     const started = await callEveStudioTool("agent_start", {
       agentId: agentId(),
@@ -183,6 +230,7 @@ export async function POST(req: NextRequest) {
     const invocationId = started.invocationId;
     if (typeof invocationId !== "string")
       throw new Error("Eve Studio did not return a planning run ID.");
+    const startedAt = Date.now();
     const handle = encrypt(
       JSON.stringify({
         invocationId,
@@ -191,7 +239,8 @@ export async function POST(req: NextRequest) {
         url: repository,
         commitSha,
         taskGrant,
-        expiresAt: Date.now() + 24 * 60 * 60 * 1_000,
+        startedAt,
+        expiresAt: startedAt + 30 * 24 * 60 * 60 * 1_000,
       } satisfies Handle),
     );
     return NextResponse.json(
@@ -199,6 +248,8 @@ export async function POST(req: NextRequest) {
         handle,
         mode: "deployment",
         status: "working",
+        runId: invocationId,
+        startedAt,
         commitSha,
         requiredSecretNames: [],
       },
@@ -241,12 +292,20 @@ export async function GET(req: NextRequest) {
     );
   }
   try {
-    const state = await callEveStudioTool("agent_get", {
+    const state: Record<string, unknown> = await callEveStudioTool("agent_get", {
       agentId: handle.agentId,
       invocationId: handle.invocationId,
+    }).catch((error: unknown) => {
+      if (!handle.taskGrant) throw error;
+      return {
+        status: "unavailable",
+        error: {
+          message: error instanceof Error ? error.message : "Could not reach Eve Studio.",
+        },
+      };
     });
     if (handle.taskGrant) {
-      const task = readFlyHubEveTask(handle.taskGrant);
+      const task = readFlyHubEveTask(handle.taskGrant, { allowExpired: true });
       if (
         !task ||
         task.orgSlug !== auth.cfg.orgSlug ||
@@ -255,17 +314,19 @@ export async function GET(req: NextRequest) {
         throw new Error("This Eve deployment task has expired.");
       const [owner, repo] = task.repository.split("/");
       const appName = flyHubAppName(task.orgSlug, owner, repo, ".");
-      const machines = (await appExists(appName, auth.cfg))
-        ? await listMachines(appName, auth.cfg)
-        : [];
+      const [machines, runtimeMachines, pendingStatus] = await Promise.all([
+        listMachines(appName, auth.cfg),
+        listMachines(runtimeAppName(appName), auth.cfg),
+        getPreviewBuilderStatus(
+          appName,
+          auth.cfg.token,
+          process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder",
+        ),
+      ]);
       const gateway = machines.find(
         (machine) => machine.config?.env?.FLY_HUB_PASSWORD_HASH,
       );
-      const pendingStatus = await getPreviewBuilderStatus(
-        appName,
-        auth.cfg.token,
-        process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder",
-      );
+      const runtimeMachine = runtimeMachines[0];
       const ready =
         gateway?.state === "started"
           ? await fetch(`https://${appName}.fly.dev/_kody/health`, {
@@ -281,16 +342,52 @@ export async function GET(req: NextRequest) {
           .update(label)
           .digest("base64url")
           .slice(0, 32);
+      const progress = appRunStage({
+        eveStatus: typeof state.status === "string" ? state.status : "working",
+        eveError: typeof state.error === "string"
+          ? state.error
+          : state.error && typeof state.error === "object" && "message" in state.error && typeof state.error.message === "string"
+            ? state.error.message
+            : null,
+        builderState: pendingStatus?.state,
+        gatewayState: gateway?.state,
+        runtimeState: runtimeMachine?.state,
+        ready,
+      });
       return NextResponse.json(
         {
           mode: "deployment",
           status: state.status,
+          runId: handle.invocationId,
+          startedAt: handle.startedAt ?? null,
+          checkedAt: Date.now(),
+          progress,
           result: state.result ?? null,
           error: state.error ?? null,
           inputRequests: state.inputRequests ?? null,
           authorization: state.authorization ?? null,
           url: handle.url,
           commitSha: task.commitSha,
+          machines: {
+            builder: pendingStatus
+              ? {
+                  id: pendingStatus.machineId ?? null,
+                  state: pendingStatus.machineState ?? null,
+                  startedAt: pendingStatus.createdAt ?? null,
+                  error: pendingStatus.error ?? null,
+                }
+              : null,
+            gateway: gateway
+              ? { id: gateway.id, state: gateway.state, region: gateway.region }
+              : null,
+            runtime: runtimeMachine
+              ? {
+                  id: runtimeMachine.id,
+                  state: runtimeMachine.state,
+                  region: runtimeMachine.region,
+                }
+              : null,
+          },
           app: gateway
             ? {
                 appName,
