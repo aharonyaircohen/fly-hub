@@ -107,6 +107,7 @@ export interface SpawnAppBuilderInput {
     dockerBuildTarget?: string;
     runtimeEnv?: Record<string, string>;
     generatedSecretNames?: string[];
+    storagePath?: string;
     verification?: { path: string; expectedStatus: number };
   };
   exposure: "private" | "public";

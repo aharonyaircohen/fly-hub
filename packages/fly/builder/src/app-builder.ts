@@ -55,6 +55,29 @@ function run(
     );
   });
 }
+function runOutput(
+  command: string,
+  args: string[],
+  options: { cwd?: string; env?: Record<string, string> } = {},
+): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: { ...process.env, ...options.env },
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("exit", (code) =>
+      code === 0
+        ? resolvePromise(output)
+        : reject(new Error(`${command} exited ${code}`)),
+    );
+  });
+}
 type Plan = {
   kind: string;
   rootDirectory: string;
@@ -67,6 +90,7 @@ type Plan = {
   dockerBuildTarget?: string;
   runtimeEnv?: Record<string, string>;
   generatedSecretNames?: string[];
+  storagePath?: string;
   verification?: AppVerification;
 };
 type Storage = { volumeId: string; mountPath: string };
@@ -161,8 +185,15 @@ async function main() {
   const cloneUrl = process.env.GITHUB_TOKEN
     ? `https://x-access-token:${encodeURIComponent(process.env.GITHUB_TOKEN)}@github.com/${repo}.git`
     : `https://github.com/${repo}.git`;
-  await run("git", ["clone", "--filter=blob:none", cloneUrl, cwd]);
-  await run("git", ["checkout", ref], { cwd });
+  await run("git", ["clone", "--depth=1", "--filter=blob:none", cloneUrl, cwd]);
+  try {
+    await run("git", ["checkout", ref], { cwd });
+  } catch {
+    // The branch may have advanced after inspection. Fetch only the pinned
+    // commit instead of the repository's entire history.
+    await run("git", ["fetch", "--depth=1", "origin", ref], { cwd });
+    await run("git", ["checkout", ref], { cwd });
+  }
   const appRoot = resolve(cwd, plan.rootDirectory || ".");
   const generatedDockerfile =
     !(await exists(resolve(appRoot, "Dockerfile"))) &&
@@ -187,6 +218,42 @@ async function main() {
     await allocateSharedIps(appName, flyToken);
     await allocatePrivateIp(runtimeName, flyToken);
   } else await allocateSharedIps(runtimeName, flyToken);
+  if (plan.storagePath && !storage.length) {
+    const env = { FLY_API_TOKEN: flyToken };
+    const existing = JSON.parse(
+      await runOutput(
+        "flyctl",
+        ["volumes", "list", "--app", runtimeName, "--json"],
+        { env },
+      ),
+    ) as Array<{ id?: string; name?: string }>;
+    let volumeId = existing.find((volume) => volume.name === "flyhub_data")?.id;
+    if (!volumeId) {
+      const created = JSON.parse(
+        await runOutput(
+          "flyctl",
+          [
+            "volumes",
+            "create",
+            "flyhub_data",
+            "--app",
+            runtimeName,
+            "--region",
+            process.env.FLY_REGION ?? "fra",
+            "--size",
+            "1",
+            "--json",
+            "--yes",
+          ],
+          { env },
+        ),
+      ) as { id?: string } | Array<{ id?: string }>;
+      volumeId = Array.isArray(created) ? created[0]?.id : created.id;
+    }
+    if (!volumeId)
+      throw new Error("Could not create the app's storage volume.");
+    storage.push({ volumeId, mountPath: plan.storagePath });
+  }
   if (Object.keys(secrets).length) {
     const input =
       Object.entries(secrets)
@@ -265,7 +332,7 @@ async function main() {
     );
   if (storage.length) {
     for (const volume of storage)
-      await snapshotVolume(appName, volume.volumeId, flyToken);
+      await snapshotVolume(runtimeName, volume.volumeId, flyToken);
     for (const prior of [...oldRuntimeMachines, ...oldGatewayMachines]) {
       const owner = oldRuntimeMachines.includes(prior) ? runtimeName : appName;
       await cordonMachine(owner, prior.id, flyToken).catch(() => undefined);
@@ -278,6 +345,10 @@ async function main() {
       appName: runtimeName,
       region: process.env.FLY_REGION ?? "fra",
       image,
+      ...(plan.startCommand &&
+      (plan.kind === "dockerfile" || plan.kind === "fly")
+        ? { cmd: ["sh", "-lc", plan.startCommand] }
+        : {}),
       internalPort: plan.port ?? 3000,
       additionalPorts: plan.apiPort ? [plan.apiPort] : undefined,
       publicServices: true,
@@ -376,7 +447,13 @@ async function main() {
             appName: runtimeName,
             region: oldRuntime.region ?? process.env.FLY_REGION ?? "fra",
             image: oldRuntime.config.image,
-            internalPort: plan.port ?? 3000,
+            ...(oldRuntime.config?.init?.cmd
+              ? { cmd: oldRuntime.config.init.cmd }
+              : {}),
+            internalPort:
+              oldRuntime.config?.services?.[0]?.internal_port ??
+              plan.port ??
+              3000,
             additionalPorts: plan.apiPort ? [plan.apiPort] : undefined,
             publicServices: true,
             mounts: storage.map((volume) => ({

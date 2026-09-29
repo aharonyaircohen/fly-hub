@@ -80,7 +80,9 @@ describe("Fly Hub public repository inspection", () => {
           tree: [{ path: "Dockerfile", type: "blob", size: 60 }],
         });
       if (url.endsWith("/Dockerfile"))
-        return new Response('FROM python:3.13\nENTRYPOINT ["/entrypoint.sh"]\nCMD []\n');
+        return new Response(
+          'FROM python:3.13\nENTRYPOINT ["/entrypoint.sh"]\nCMD []\n',
+        );
       return new Response("missing", { status: 404 });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -92,5 +94,34 @@ describe("Fly Hub public repository inspection", () => {
     expect(result.plan.questions).toEqual([
       "This Dockerfile has no default web command or HTTP port. Which service should run, and on what port?",
     ]);
+  });
+
+  it("uses the planned commit even after the default branch advances", async () => {
+    const sha = "c".repeat(40);
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/repos/acme/site"))
+        return Response.json({ default_branch: "main", private: false });
+      if (url.endsWith(`/git/commits/${sha}`))
+        return Response.json({ sha, tree: { sha: "pinned-tree" } });
+      if (url.includes("/git/trees/pinned-tree"))
+        return Response.json({
+          truncated: false,
+          tree: [{ path: "Dockerfile", type: "blob", size: 40 }],
+        });
+      if (url.endsWith("/Dockerfile"))
+        return new Response("FROM nginx:alpine\nEXPOSE 8080\n");
+      return new Response("missing", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await inspectPublicGitHubApp({
+      url: "https://github.com/acme/site",
+      org: "personal",
+      commitSha: sha,
+    });
+    expect(result.commitSha).toBe(sha);
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/branches/main"),
+      expect.anything(),
+    );
   });
 });

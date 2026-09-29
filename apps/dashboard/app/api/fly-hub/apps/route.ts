@@ -2,6 +2,9 @@ import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { inspectPublicGitHubApp } from "@kody-ade/fly/hub/app-source";
 import { requireHubConfig, sameOrigin } from "@kody-ade/fly/hub/session";
+import { readEvePlanHandle } from "./agent/route";
+import { callEveStudioTool } from "@dashboard/lib/eve-studio-client";
+import { parseEveAppPlan, type EveAppPlan } from "@dashboard/lib/eve-app-plan";
 import {
   appExists,
   listAppsByPrefix,
@@ -83,33 +86,101 @@ export async function POST(req: NextRequest) {
     url?: unknown;
     rootDirectory?: unknown;
     commitSha?: unknown;
+    eveHandle?: unknown;
+    runtimeSecrets?: unknown;
   } | null;
+  const fromEve = typeof body?.eveHandle === "string";
   if (
-    typeof body?.url !== "string" ||
-    body.url.length > 500 ||
-    (body.rootDirectory !== undefined &&
-      (typeof body.rootDirectory !== "string" ||
-        body.rootDirectory.length > 200)) ||
-    typeof body.commitSha !== "string"
+    !body ||
+    (fromEve
+      ? (body.eveHandle as string).length > 4_096
+      : typeof body.url !== "string" ||
+        body.url.length > 500 ||
+        (body.rootDirectory !== undefined &&
+          (typeof body.rootDirectory !== "string" ||
+            body.rootDirectory.length > 200)) ||
+        typeof body.commitSha !== "string")
   )
     return NextResponse.json(
       { error: "Invalid app setup request." },
       { status: 400 },
     );
   try {
+    let evePlan: EveAppPlan | null = null;
+    let url = body.url as string;
+    let commitSha = body.commitSha as string;
+    let rootDirectory = body.rootDirectory as string | undefined;
+    let suppliedSecrets: Record<string, string> = {};
+    if (fromEve) {
+      try {
+        const handle = readEvePlanHandle(
+          body.eveHandle as string,
+          auth.cfg.orgSlug,
+        );
+        if (!handle.commitSha)
+          throw new Error(
+            "Eve could not pin a repository commit. Inspect it again.",
+          );
+        url = handle.url;
+        commitSha = handle.commitSha;
+        const state = await callEveStudioTool("agent_get", {
+          agentId: handle.agentId,
+          invocationId: handle.invocationId,
+        });
+        if (state.status !== "completed")
+          throw new Error("Eve has not finished the deployment plan.");
+        evePlan = parseEveAppPlan(state.result);
+        rootDirectory = evePlan.rootDirectory;
+        if (evePlan.questions.length)
+          throw new Error(
+            `Resolve Eve's setup questions first: ${evePlan.questions[0]}`,
+          );
+        if (
+          !body.runtimeSecrets ||
+          typeof body.runtimeSecrets !== "object" ||
+          Array.isArray(body.runtimeSecrets)
+        )
+          throw new Error("Provide the required app secrets.");
+        suppliedSecrets = body.runtimeSecrets as Record<string, string>;
+        if (
+          Object.keys(suppliedSecrets).length > 20 ||
+          Object.entries(suppliedSecrets).some(
+            ([key, value]) =>
+              !/^[A-Z_][A-Z0-9_]{0,99}$/.test(key) ||
+              typeof value !== "string" ||
+              value.length > 4_096,
+          )
+        )
+          throw new Error("Invalid app secrets.");
+      } catch (error) {
+        return NextResponse.json(
+          {
+            error: error instanceof Error ? error.message : "Invalid Eve plan.",
+          },
+          { status: 400 },
+        );
+      }
+    }
     const inspected = await inspectPublicGitHubApp({
-      url: body.url,
+      url,
       org: auth.cfg.orgSlug,
-      rootDirectory: body.rootDirectory as string | undefined,
+      rootDirectory,
+      ...(fromEve ? { commitSha } : {}),
     });
-    if (inspected.commitSha !== body.commitSha)
+    if (inspected.commitSha !== commitSha)
       return NextResponse.json(
         { error: "The repository changed. Inspect it again before deploying." },
         { status: 409 },
       );
+    if (evePlan && inspected.plan.kind === "unsupported")
+      return NextResponse.json(
+        { error: "Eve's selected directory has no supported build source." },
+        { status: 400 },
+      );
     if (
-      inspected.plan.kind === "unsupported" ||
-      inspected.plan.questions?.length
+      !evePlan &&
+      (inspected.plan.kind === "unsupported" ||
+        inspected.plan.questions?.length)
     )
       return NextResponse.json(
         {
@@ -119,14 +190,14 @@ export async function POST(req: NextRequest) {
         },
         { status: 400 },
       );
-    if (inspected.requiredSecretNames.length)
+    if (!evePlan && inspected.requiredSecretNames.length)
       return NextResponse.json(
         {
           error: `Add required secrets before deployment: ${inspected.requiredSecretNames.join(", ")}`,
         },
         { status: 400 },
       );
-    if (inspected.plan.generatedSecretNames?.length)
+    if (!evePlan && inspected.plan.generatedSecretNames?.length)
       return NextResponse.json(
         {
           error: `Secret setup is required before deployment: ${inspected.plan.generatedSecretNames.join(", ")}`,
@@ -174,25 +245,84 @@ export async function POST(req: NextRequest) {
         { status: 503 },
       );
     const password = crypto.randomBytes(24).toString("base64url");
+    const appPassword = evePlan?.appPasswordEnv
+      ? crypto.randomBytes(24).toString("base64url")
+      : null;
     const passwordHash = crypto
       .createHash("sha256")
       .update(password)
       .digest("hex");
     const launchKey = crypto.randomBytes(32).toString("hex");
+    const requiredSecrets = [
+      ...new Set([
+        ...inspected.requiredSecretNames,
+        ...(evePlan?.requiredSecrets ?? []),
+      ]),
+    ].filter(
+      (name) =>
+        name !== evePlan?.appPasswordEnv &&
+        !evePlan?.generatedSecrets.includes(name),
+    );
+    if (requiredSecrets.some((name) => !suppliedSecrets[name]?.trim()))
+      return NextResponse.json(
+        {
+          error: `Provide required app secrets: ${requiredSecrets.filter((name) => !suppliedSecrets[name]?.trim()).join(", ")}`,
+        },
+        { status: 400 },
+      );
+    if (
+      Object.keys(suppliedSecrets).some(
+        (name) => !requiredSecrets.includes(name),
+      )
+    )
+      return NextResponse.json(
+        { error: "The secret list changed. Plan the app again." },
+        { status: 400 },
+      );
+    const runtimeSecrets: Record<string, string> = { ...suppliedSecrets };
+    for (const name of evePlan?.generatedSecrets ?? [])
+      runtimeSecrets[name] = crypto.randomBytes(32).toString("base64url");
+    if (evePlan?.appPasswordEnv && appPassword)
+      runtimeSecrets[evePlan.appPasswordEnv] = appPassword;
+    const buildPlan = evePlan
+      ? {
+          ...inspected.plan,
+          ...(evePlan.startCommand
+            ? { startCommand: evePlan.startCommand }
+            : {}),
+          ...(evePlan.port ? { port: evePlan.port } : {}),
+          ...(evePlan.persistentPaths[0]
+            ? { storagePath: evePlan.persistentPaths[0] }
+            : {}),
+          verification: { path: evePlan.verificationPath, expectedStatus: 200 },
+        }
+      : inspected.plan;
+    if (
+      evePlan &&
+      (!buildPlan.port ||
+        (inspected.plan.questions?.length && !evePlan.startCommand))
+    )
+      return NextResponse.json(
+        { error: "Eve's plan needs a web command and port before deployment." },
+        { status: 400 },
+      );
     await spawnAppBuilder({
       repo: inspected.repository,
       ref: inspected.commitSha,
       appName: inspected.appName,
       imageTag: inspected.commitSha.slice(0, 12),
-      buildPlan: inspected.plan,
+      buildPlan,
       exposure: "private",
       tokenHashes: [],
       flyHubPasswordHash: passwordHash,
       flyHubName: inspected.name,
       builderHostApp: builderHost(),
       builderImage,
-      runtimeSecrets: {},
-      runtimeEnv: inspected.plan.runtimeEnv ?? {},
+      runtimeSecrets,
+      runtimeEnv: {
+        ...(inspected.plan.runtimeEnv ?? {}),
+        ...(evePlan?.runtimeEnv ?? {}),
+      },
       flyToken: auth.cfg.token,
       flyOrgSlug: auth.cfg.orgSlug,
       flyRegion: auth.cfg.defaultRegion,
@@ -207,11 +337,22 @@ export async function POST(req: NextRequest) {
         appName: inspected.appName,
         url: `https://${inspected.appName}.fly.dev`,
         password,
+        appCredential: evePlan?.appPasswordEnv
+          ? { name: evePlan.appPasswordEnv, password: appPassword }
+          : null,
         status: "building",
-        instructions:
-          "Check app status until pendingReady is true. Open the URL and enter the shared password. Use Apps in Fly Hub to reset it later.",
+        instructions: [
+          evePlan?.summary,
+          evePlan?.usage,
+          evePlan?.credentialNotes,
+          "Wait until the app is ready, then open the URL. Enter the Fly Hub shared password at the outer gate. If the app has its own login, use the separate app credential shown here. Reset password in Fly Hub changes only the outer gate.",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
         message:
-          "Save this password now. Fly Hub cannot display it again; you can reset it later.",
+          appPassword
+            ? "Save both passwords now. Fly Hub can reset the outer gate password later; it cannot display the app login password again."
+            : "Save this password now. Fly Hub cannot display it again; you can reset it later.",
       },
       { status: 202, headers: { "Cache-Control": "no-store, private" } },
     );

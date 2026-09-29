@@ -128,7 +128,12 @@ export async function listMachines(
     id: string;
     state: string;
     region?: string;
-    config?: { image?: string; env?: Record<string, string> };
+    config?: {
+      image?: string;
+      env?: Record<string, string>;
+      init?: { cmd?: string[] };
+      services?: Array<{ internal_port?: number }>;
+    };
   }>
 > {
   const res = await fetch(
@@ -144,7 +149,12 @@ export async function listMachines(
     id: string;
     state: string;
     region?: string;
-    config?: { image?: string; env?: Record<string, string> };
+    config?: {
+      image?: string;
+      env?: Record<string, string>;
+      init?: { cmd?: string[] };
+      services?: Array<{ internal_port?: number }>;
+    };
   }>;
   return data.map((m) => ({
     id: m.id,
@@ -199,6 +209,8 @@ export interface CreatePreviewMachineInput {
   appName: string;
   region: string;
   image: string;
+  /** Override the image CMD while preserving its ENTRYPOINT. */
+  cmd?: string[];
   internalPort?: number;
   additionalPorts?: number[];
   /** Runtime env (vault secrets) — needed for SSR pages that read
@@ -249,6 +261,7 @@ export async function createPreviewMachine(
       : {}),
     config: {
       image: input.image,
+      ...(input.cmd?.length ? { init: { cmd: input.cmd } } : {}),
       ...(input.processGroup
         ? { metadata: { fly_process_group: input.processGroup } }
         : {}),
@@ -380,7 +393,10 @@ export const startMachine = async (
     try {
       return await machineAction(appName, machineId, "start", token);
     } catch (error) {
-      if (!(error instanceof Error) || !error.message.includes("start failed: 412"))
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes("start failed: 412")
+      )
         throw error;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
     }

@@ -67,6 +67,7 @@ export async function inspectPublicGitHubApp(input: {
   url: string;
   org: string;
   rootDirectory?: string;
+  commitSha?: string;
 }) {
   const { owner, repo } = parsePublicGitHubRepo(input.url);
   const rootDirectory =
@@ -85,13 +86,22 @@ export async function inspectPublicGitHubApp(input: {
   }>(`/repos/${owner}/${repo}`);
   if (repository.private)
     throw new Error("The first version supports public repositories only.");
-  const branch = await githubJson<{
-    commit: { sha: string; commit: { tree: { sha: string } } };
-  }>(
-    `/repos/${owner}/${repo}/branches/${encodeURIComponent(repository.default_branch)}`,
-  );
-  const commitSha = branch.commit?.sha;
-  const treeSha = branch.commit?.commit?.tree?.sha;
+  if (input.commitSha && !/^[a-f0-9]{40}$/.test(input.commitSha))
+    throw new Error("Invalid repository commit.");
+  const commit = input.commitSha
+    ? await githubJson<{ sha: string; tree: { sha: string } }>(
+        `/repos/${owner}/${repo}/git/commits/${input.commitSha}`,
+      )
+    : null;
+  const branch = commit
+    ? null
+    : await githubJson<{
+        commit: { sha: string; commit: { tree: { sha: string } } };
+      }>(
+        `/repos/${owner}/${repo}/branches/${encodeURIComponent(repository.default_branch)}`,
+      );
+  const commitSha = commit?.sha ?? branch?.commit?.sha;
+  const treeSha = commit?.tree?.sha ?? branch?.commit?.commit?.tree?.sha;
   if (!commitSha || !treeSha)
     throw new Error("GitHub did not return the repository's current commit.");
   const tree = await githubJson<{

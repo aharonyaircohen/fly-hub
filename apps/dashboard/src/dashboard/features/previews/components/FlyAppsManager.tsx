@@ -35,6 +35,32 @@ type Pending = {
   password: string;
   status: string;
   message: string;
+  instructions?: string;
+  appCredential?: { name: string; password: string } | null;
+};
+type EvePlan = {
+  summary: string;
+  usage: string;
+  credentialNotes: string;
+  service: string;
+  rootDirectory: string;
+  startCommand?: string | null;
+  port?: number | null;
+  persistentPaths: string[];
+  requiredSecrets: string[];
+  generatedSecrets: string[];
+  appPasswordEnv?: string | null;
+  runtimeEnv: Record<string, string>;
+  questions: string[];
+  verificationPath: string;
+  evidence: string[];
+};
+type EveInputRequest = {
+  requestId: string;
+  kind?: string;
+  prompt?: string;
+  question?: string;
+  options?: Array<{ id: string; label?: string; description?: string }>;
 };
 
 async function json<T>(response: Response): Promise<T> {
@@ -48,6 +74,20 @@ async function json<T>(response: Response): Promise<T> {
 
 export function FlyAppsManager() {
   const [url, setUrl] = useState("");
+  const [setupPrompt, setSetupPrompt] = useState("");
+  const [agentHandle, setAgentHandle] = useState<string | null>(null);
+  const [agentState, setAgentState] = useState<string | null>(null);
+  const [agentResult, setAgentResult] = useState<unknown>(null);
+  const [agentPlan, setAgentPlan] = useState<EvePlan | null>(null);
+  const [agentPlanError, setAgentPlanError] = useState<string | null>(null);
+  const [agentCommitSha, setAgentCommitSha] = useState<string | null>(null);
+  const [agentSourceSecrets, setAgentSourceSecrets] = useState<string[]>([]);
+  const [agentSecrets, setAgentSecrets] = useState<Record<string, string>>({});
+  const [agentInputs, setAgentInputs] = useState<
+    Record<string, EveInputRequest>
+  >({});
+  const [agentAnswers, setAgentAnswers] = useState<Record<string, string>>({});
+  const [agentAuthorization, setAgentAuthorization] = useState<unknown>(null);
   const [rootDirectory, setRootDirectory] = useState("");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [apps, setApps] = useState<App[]>([]);
@@ -63,6 +103,60 @@ export function FlyAppsManager() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
   const pendingAppName = pending?.appName;
+
+  useEffect(() => {
+    if (!agentHandle) return;
+    let active = true;
+    async function refresh() {
+      try {
+        const data = await json<{
+          status: string;
+          result: unknown;
+          error?: string | null;
+          plan?: EvePlan | null;
+          planError?: string | null;
+          inputRequests?: Record<string, EveInputRequest> | null;
+          authorization?: unknown;
+        }>(
+          await fetch(
+            `/api/fly-hub/apps/agent?handle=${encodeURIComponent(agentHandle!)}`,
+            { cache: "no-store" },
+          ),
+        );
+        if (!active) return;
+        setAgentState(data.status);
+        if (data.result != null) setAgentResult(data.result);
+        if (data.plan) setAgentPlan(data.plan);
+        if (data.planError) setAgentPlanError(data.planError);
+        setAgentInputs(data.inputRequests ?? {});
+        setAgentAuthorization(data.authorization ?? null);
+        if (data.status === "failed")
+          setError(
+            data.error || "Eve could not complete this deployment plan.",
+          );
+      } catch (cause) {
+        if (active)
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Could not read Eve's plan.",
+          );
+      }
+    }
+    void refresh();
+    const timer = window.setInterval(() => {
+      if (
+        agentState !== "completed" &&
+        agentState !== "failed" &&
+        agentState !== "cancelled"
+      )
+        void refresh();
+    }, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [agentHandle, agentState]);
 
   useEffect(() => {
     let active = true;
@@ -122,6 +216,43 @@ export function FlyAppsManager() {
     }
   }
 
+  async function planWithEve() {
+    setBusy("agent");
+    setError("");
+    setAgentHandle(null);
+    setAgentState(null);
+    setAgentResult(null);
+    setAgentPlan(null);
+    setAgentPlanError(null);
+    setAgentSecrets({});
+    setAgentInputs({});
+    setAgentAnswers({});
+    setAgentAuthorization(null);
+    setPlan(null);
+    try {
+      const result = await json<{
+        handle: string;
+        status: string;
+        commitSha?: string;
+        requiredSecretNames?: string[];
+      }>(
+        await fetch("/api/fly-hub/apps/agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, prompt: setupPrompt }),
+        }),
+      );
+      setAgentHandle(result.handle);
+      setAgentState(result.status);
+      setAgentCommitSha(result.commitSha ?? null);
+      setAgentSourceSecrets(result.requiredSecretNames ?? []);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not start Eve.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function deploy() {
     if (!plan) return;
     setBusy("deploy");
@@ -143,6 +274,66 @@ export function FlyAppsManager() {
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Could not start deployment.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deployEvePlan() {
+    if (!agentHandle || !agentPlan) return;
+    setBusy("deploy");
+    setError("");
+    try {
+      const result = await json<Pending>(
+        await fetch("/api/fly-hub/apps", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            eveHandle: agentHandle,
+            runtimeSecrets: agentSecrets,
+          }),
+        }),
+      );
+      setPending(result);
+      setAgentSecrets({});
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Could not start deployment.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function answerEve() {
+    if (!agentHandle) return;
+    setBusy("answer");
+    setError("");
+    try {
+      const responses = Object.values(agentInputs).map((request) => {
+        const value = agentAnswers[request.requestId] ?? "";
+        return request.options?.length
+          ? { requestId: request.requestId, optionId: value }
+          : { requestId: request.requestId, text: value };
+      });
+      await json(
+        await fetch("/api/fly-hub/apps/agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "answer",
+            handle: agentHandle,
+            responses,
+          }),
+        }),
+      );
+      setAgentState("working");
+      setAgentInputs({});
+      setAgentAnswers({});
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Could not answer Eve.",
       );
     } finally {
       setBusy(null);
@@ -178,6 +369,15 @@ export function FlyAppsManager() {
     !plan.plan.generatedSecretNames?.length;
   const pendingApp =
     pending && apps.find((app) => app.appName === pending.appName);
+  const requiredAgentSecrets = agentPlan
+    ? [
+        ...new Set([...agentSourceSecrets, ...agentPlan.requiredSecrets]),
+      ].filter(
+        (name) =>
+          name !== agentPlan.appPasswordEnv &&
+          !agentPlan.generatedSecrets.includes(name),
+      )
+    : [];
 
   return (
     <div className="mx-auto max-w-4xl space-y-8 py-3">
@@ -204,9 +404,24 @@ export function FlyAppsManager() {
             onChange={(event) => {
               setUrl(event.target.value);
               setPlan(null);
+              setAgentHandle(null);
+              setAgentResult(null);
+              setAgentPlan(null);
             }}
             placeholder="https://github.com/owner/repo"
             className="mt-2"
+          />
+        </label>
+        <label className="block text-sm font-medium">
+          What should the app do?{" "}
+          <span className="font-normal text-muted-foreground">(optional)</span>
+          <textarea
+            value={setupPrompt}
+            onChange={(event) => setSetupPrompt(event.target.value)}
+            maxLength={5_000}
+            rows={3}
+            placeholder="For example: open the web dashboard, keep its data, and explain any credentials I need."
+            className="mt-2 w-full rounded-md border bg-background px-3 py-2 text-sm"
           />
         </label>
         <label className="block text-sm font-medium">
@@ -222,13 +437,191 @@ export function FlyAppsManager() {
             className="mt-2"
           />
         </label>
-        <Button
-          type="button"
-          disabled={!url.trim() || busy !== null}
-          onClick={() => void inspect()}
-        >
-          {busy === "inspect" ? "Inspecting…" : "Inspect repository"}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            disabled={!url.trim() || busy !== null}
+            onClick={() => void planWithEve()}
+          >
+            {busy === "agent" ? "Starting Eve…" : "Plan with Eve"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!url.trim() || busy !== null}
+            onClick={() => void inspect()}
+          >
+            {busy === "inspect" ? "Inspecting…" : "Inspect files"}
+          </Button>
+        </div>
+        {agentHandle && (
+          <div className="rounded-lg border bg-muted/30 p-4 space-y-2 text-sm">
+            <h3 className="font-semibold">Eve deployment plan</h3>
+            <p role="status">
+              {agentState === "completed"
+                ? "Plan complete. Review the setup and missing inputs below."
+                : agentState === "failed"
+                  ? "Eve could not finish the plan."
+                  : agentState === "input_required"
+                    ? "Eve needs your answer to continue."
+                    : agentState === "authorization_required"
+                      ? "Eve needs a connected account to continue."
+                      : "Eve is reading the repository and planning its setup…"}
+            </p>
+            {agentState === "input_required" &&
+              Object.values(agentInputs).map((request) => (
+                <label key={request.requestId} className="block font-medium">
+                  {request.prompt ||
+                    request.question ||
+                    request.kind ||
+                    "Eve question"}
+                  {request.options?.length ? (
+                    <select
+                      value={agentAnswers[request.requestId] ?? ""}
+                      onChange={(event) =>
+                        setAgentAnswers((current) => ({
+                          ...current,
+                          [request.requestId]: event.target.value,
+                        }))
+                      }
+                      className="mt-1 block w-full rounded-md border bg-background px-3 py-2"
+                    >
+                      <option value="">Choose an answer</option>
+                      {request.options.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label || option.description || option.id}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <textarea
+                      value={agentAnswers[request.requestId] ?? ""}
+                      onChange={(event) =>
+                        setAgentAnswers((current) => ({
+                          ...current,
+                          [request.requestId]: event.target.value,
+                        }))
+                      }
+                      rows={2}
+                      className="mt-1 block w-full rounded-md border bg-background px-3 py-2"
+                    />
+                  )}
+                </label>
+              ))}
+            {agentState === "input_required" &&
+              Object.keys(agentInputs).length > 0 && (
+                <Button
+                  type="button"
+                  disabled={
+                    busy !== null ||
+                    Object.values(agentInputs).some(
+                      (request) => !agentAnswers[request.requestId]?.trim(),
+                    )
+                  }
+                  onClick={() => void answerEve()}
+                >
+                  {busy === "answer" ? "Sending…" : "Continue Eve plan"}
+                </Button>
+              )}
+            {agentState === "authorization_required" &&
+              agentAuthorization != null && (
+                <pre className="overflow-auto whitespace-pre-wrap break-words rounded bg-background p-3 text-xs">
+                  {JSON.stringify(agentAuthorization, null, 2)}
+                </pre>
+              )}
+            {agentPlan && (
+              <div className="space-y-2">
+                <p>{agentPlan.summary}</p>
+                {agentPlan.usage && <p>{agentPlan.usage}</p>}
+                {agentPlan.credentialNotes && (
+                  <p>{agentPlan.credentialNotes}</p>
+                )}
+                <p>
+                  <strong>Service:</strong> {agentPlan.service}
+                </p>
+                <p>
+                  <strong>Source:</strong> {agentPlan.rootDirectory} ·{" "}
+                  {agentCommitSha?.slice(0, 12) ?? "commit not pinned"}
+                </p>
+                <p>
+                  <strong>Start:</strong>{" "}
+                  {agentPlan.startCommand || "repository default"} · port{" "}
+                  {agentPlan.port ?? "unknown"}
+                </p>
+                <p>
+                  <strong>Storage:</strong>{" "}
+                  {agentPlan.persistentPaths.length
+                    ? `${agentPlan.persistentPaths.join(", ")} on a 1 GB Fly volume`
+                    : "No persistent volume proposed"}
+                </p>
+                {agentPlan.appPasswordEnv && (
+                  <p>
+                    Fly Hub will generate a separate app login password for{" "}
+                    {agentPlan.appPasswordEnv}.
+                  </p>
+                )}
+                {agentPlan.generatedSecrets.length > 0 && (
+                  <p>
+                    Fly Hub will generate:{" "}
+                    {agentPlan.generatedSecrets.join(", ")}.
+                  </p>
+                )}
+                {agentPlan.questions.map((question) => (
+                  <p key={question} className="text-destructive">
+                    {question}
+                  </p>
+                ))}
+                {requiredAgentSecrets.map((name) => (
+                  <label key={name} className="block font-medium">
+                    {name}
+                    <Input
+                      type="password"
+                      autoComplete="off"
+                      value={agentSecrets[name] ?? ""}
+                      onChange={(event) =>
+                        setAgentSecrets((current) => ({
+                          ...current,
+                          [name]: event.target.value,
+                        }))
+                      }
+                      className="mt-1"
+                    />
+                  </label>
+                ))}
+                <p className="text-muted-foreground">
+                  Secrets go to Fly at deployment and are not sent to Eve.
+                </p>
+                <Button
+                  type="button"
+                  disabled={
+                    busy !== null ||
+                    !agentCommitSha ||
+                    !agentPlan.port ||
+                    agentPlan.questions.length > 0 ||
+                    requiredAgentSecrets.some(
+                      (name) => !agentSecrets[name]?.trim(),
+                    )
+                  }
+                  onClick={() => void deployEvePlan()}
+                >
+                  {busy === "deploy" ? "Starting…" : "Deploy Eve plan"}
+                </Button>
+              </div>
+            )}
+            {agentPlanError && (
+              <p className="text-destructive">
+                Eve's plan needs revision: {agentPlanError}
+              </p>
+            )}
+            {!agentPlan && agentResult != null && (
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-3 text-xs">
+                {typeof agentResult === "string"
+                  ? agentResult
+                  : JSON.stringify(agentResult, null, 2)}
+              </pre>
+            )}
+          </div>
+        )}
         {plan && (
           <div className="rounded-lg border bg-muted/30 p-4 space-y-2 text-sm">
             <h3 className="font-semibold">Deployment plan</h3>
@@ -239,7 +632,10 @@ export function FlyAppsManager() {
             <p>
               <strong>App:</strong> {plan.appName}
             </p>
-            <p>A private runtime machine and a public password gateway will be created in your Fly organization.</p>
+            <p>
+              A private runtime machine and a public password gateway will be
+              created in your Fly organization.
+            </p>
             <p>
               <strong>Detected:</strong> {plan.plan.kind} · directory{" "}
               {plan.plan.rootDirectory} · port {plan.plan.port ?? "automatic"}
@@ -313,7 +709,18 @@ export function FlyAppsManager() {
                 {pending.password}
               </code>
             </p>
+            {pending.appCredential && (
+              <p>
+                <strong>App login password ({pending.appCredential.name}):</strong>{" "}
+                <code className="select-all break-all rounded bg-background px-2 py-1">
+                  {pending.appCredential.password}
+                </code>
+              </p>
+            )}
             <p>{pending.message}</p>
+            {pending.instructions && (
+              <p className="whitespace-pre-wrap">{pending.instructions}</p>
+            )}
           </div>
         )}
         {error && (
