@@ -111,6 +111,10 @@ export interface SpawnAppBuilderInput {
   };
   exposure: "private" | "public";
   tokenHashes: string[];
+  flyHubPasswordHash?: string;
+  flyHubName?: string;
+  builderHostApp?: string;
+  builderImage?: string;
   runtimeSecrets: Record<string, string>;
   runtimeEnv: Record<string, string>;
   flyToken: string;
@@ -153,8 +157,11 @@ function builderAuthHeaders(token: string): Record<string, string> {
   };
 }
 
-function builderMachinesUrl(machineId?: string): string {
-  const base = `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(BUILDER_HOST_APP)}/machines`;
+function builderMachinesUrl(
+  machineId?: string,
+  hostApp = BUILDER_HOST_APP,
+): string {
+  const base = `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(hostApp)}/machines`;
   return machineId
     ? `${base}/${encodeURIComponent(machineId)}?force=true`
     : base;
@@ -249,9 +256,10 @@ function newestFirst(a: BuilderMachineInfo, b: BuilderMachineInfo): number {
 export async function getPreviewBuilderStatus(
   appName: string,
   token: string,
+  hostApp = BUILDER_HOST_APP,
 ): Promise<PreviewBuilderStatus | null> {
   try {
-    const res = await fetch(builderMachinesUrl(), {
+    const res = await fetch(builderMachinesUrl(undefined, hostApp), {
       method: "GET",
       headers: builderAuthHeaders(token),
       signal: AbortSignal.timeout(BUILDER_MAINTENANCE_TIMEOUT_MS),
@@ -280,8 +288,9 @@ export async function getPreviewBuilderStatus(
 async function destroyBuilderMachine(
   machineId: string,
   token: string,
+  hostApp = BUILDER_HOST_APP,
 ): Promise<void> {
-  const res = await fetch(builderMachinesUrl(machineId), {
+  const res = await fetch(builderMachinesUrl(machineId, hostApp), {
     method: "DELETE",
     headers: builderAuthHeaders(token),
     signal: AbortSignal.timeout(BUILDER_MAINTENANCE_TIMEOUT_MS),
@@ -298,9 +307,10 @@ async function pruneBuilderMachines(
   token: string,
   targetAppName: string,
   targetRef: string,
+  hostApp = BUILDER_HOST_APP,
 ): Promise<BuilderMachineInfo | null> {
   try {
-    const res = await fetch(builderMachinesUrl(), {
+    const res = await fetch(builderMachinesUrl(undefined, hostApp), {
       method: "GET",
       headers: builderAuthHeaders(token),
       signal: AbortSignal.timeout(BUILDER_MAINTENANCE_TIMEOUT_MS),
@@ -323,7 +333,7 @@ async function pruneBuilderMachines(
     });
     await Promise.all(
       doomed.map((m) =>
-        destroyBuilderMachine(m.id!, token).catch((err) =>
+        destroyBuilderMachine(m.id!, token, hostApp).catch((err) =>
           logger.warn(
             { err, machineId: m.id, targetAppName },
             "previews.builder: stale builder destroy failed",
@@ -473,6 +483,7 @@ export async function spawnAppBuilder(
     input.flyToken,
     input.appName,
     input.ref,
+    input.builderHostApp,
   );
   if (existing?.id)
     return {
@@ -481,7 +492,7 @@ export async function spawnAppBuilder(
     };
   const body = {
     config: {
-      image: BUILDER_IMAGE,
+      image: input.builderImage ?? BUILDER_IMAGE,
       env: {
         KODY_BUILDER_KIND: "app",
         REPO: input.repo,
@@ -493,6 +504,12 @@ export async function spawnAppBuilder(
         APP_RUNTIME_ENV_JSON: JSON.stringify(input.runtimeEnv),
         KODY_APP_EXPOSURE: input.exposure,
         KODY_APP_TOKEN_HASHES: input.tokenHashes.join(","),
+        ...(input.flyHubPasswordHash
+          ? {
+              FLY_HUB_PASSWORD_HASH: input.flyHubPasswordHash,
+              FLY_HUB_NAME: input.flyHubName ?? input.appName,
+            }
+          : {}),
         FLY_API_TOKEN: input.flyToken,
         FLY_ORG_SLUG: input.flyOrgSlug,
         FLY_REGION: input.flyRegion,
@@ -525,7 +542,7 @@ export async function spawnAppBuilder(
     region: input.flyRegion,
   };
   const res = await fetch(
-    `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(BUILDER_HOST_APP)}/machines`,
+    `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(input.builderHostApp ?? BUILDER_HOST_APP)}/machines`,
     {
       method: "POST",
       headers: builderAuthHeaders(input.flyToken),

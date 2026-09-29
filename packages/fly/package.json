@@ -13,6 +13,7 @@
     "./apps/builder-client": "./src/previews/builder-client.ts",
     "./apps/config": "./src/apps/hosting-config.ts",
     "./apps/machines-client": "./src/plugin/previews/machines-client.ts",
+    "./hub/app-source": "./src/hub/app-source.ts",
     "./apps/resources-client": "./src/apps/resources-client.ts",
     "./preview-token": "./src/preview-token.ts",
     "./preview-environments": "./src/preview-environments.ts",
@@ -27,7 +28,8 @@
     "./plugin/terminal/*": "./src/plugin/terminal/*.ts",
     "./terminal/*": "./src/terminal/*.ts",
     "./routes/*": "./src/routes/*.ts",
-    "./hub/*": "./src/hub/*.ts"
+    "./hub/*": "./src/hub/*.ts",
+    "./machines/*": "./src/machines/*.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

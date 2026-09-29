@@ -15,6 +15,44 @@ const hashes = new Set(
     .map((value) => value.trim())
     .filter((value) => /^[a-f0-9]{64}$/.test(value)),
 );
+// Fly Hub uses one generated, high-entropy password per app. Only its hash is
+// passed to this machine. Changing the hash invalidates existing sessions.
+const flyHubPasswordHash = process.env.FLY_HUB_PASSWORD_HASH ?? "";
+const hasFlyHubPassword = /^[a-f0-9]{64}$/.test(flyHubPasswordHash);
+const flyHubCookie = "flyhub_app_session";
+const sessionSeconds = 60 * 60 * 24 * 7;
+const attempts = new Map<string, { count: number; until: number }>();
+function passwordSession(): string {
+  const expiry = Math.floor(Date.now() / 1000) + sessionSeconds;
+  const signature = crypto
+    .createHmac("sha256", flyHubPasswordHash)
+    .update(String(expiry))
+    .digest("hex");
+  return `${expiry}.${signature}`;
+}
+function validPasswordSession(value: string): boolean {
+  if (!hasFlyHubPassword) return false;
+  const match = value.match(/^(\d{10})\.([a-f0-9]{64})$/);
+  if (!match || Number(match[1]) <= Math.floor(Date.now() / 1000)) return false;
+  const expected = crypto
+    .createHmac("sha256", flyHubPasswordHash)
+    .update(match[1])
+    .digest();
+  const actual = Buffer.from(match[2], "hex");
+  return (
+    actual.length === expected.length &&
+    crypto.timingSafeEqual(actual, expected)
+  );
+}
+function passwordMatches(value: string): boolean {
+  if (!hasFlyHubPassword) return false;
+  const expected = Buffer.from(flyHubPasswordHash, "hex");
+  const actual = crypto.createHash("sha256").update(value, "utf8").digest();
+  return crypto.timingSafeEqual(actual, expected);
+}
+function loginPage(error = false): string {
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>App access</title><style>body{font:16px system-ui;background:#f7f8fb;color:#18212f;min-height:100vh;display:grid;place-items:center;margin:0}main{background:white;padding:2rem;border:1px solid #dce2eb;border-radius:16px;width:min(360px,calc(100vw - 3rem));box-shadow:0 12px 36px #17203312}h1{font-size:1.4rem}label{display:block;margin:1.5rem 0 .4rem}input,button{box-sizing:border-box;width:100%;padding:.8rem;border-radius:8px;font:inherit}input{border:1px solid #b8c2d1}button{margin-top:1rem;border:0;background:#173a76;color:white;cursor:pointer}.error{color:#b42318}</style><main><h1>This app is password protected</h1><p>Enter the password shared by the app owner.</p>${error ? '<p class="error" role="alert">Incorrect password. Try again.</p>' : ""}<form method="post" action="/_flyhub/login"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus><button>Open app</button></form></main></html>`;
+}
 const repository = process.env.KODY_APP_REPOSITORY ?? "",
   appId = process.env.KODY_APP_ID ?? "",
   launchKeyRaw = process.env.KODY_APP_LAUNCH_VERIFY_KEY ?? "";
@@ -66,6 +104,8 @@ function tokenFrom(req: http.IncomingMessage): string {
 
 function authorized(req: http.IncomingMessage): boolean {
   if (isPublic) return true;
+  if (hasFlyHubPassword && validPasswordSession(cookie(req, flyHubCookie)))
+    return true;
   if (verifyLaunch(cookie(req, cookieName))) return true;
   const token = tokenFrom(req);
   if (!token) return false;
@@ -101,6 +141,63 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  if (
+    hasFlyHubPassword &&
+    url.pathname === "/_flyhub/login" &&
+    req.method === "POST"
+  ) {
+    const ip =
+      req.headers["fly-client-ip"]?.toString() ??
+      req.socket.remoteAddress ??
+      "unknown";
+    const now = Date.now();
+    const rate = attempts.get(ip);
+    if (rate && rate.until > now && rate.count >= 10) {
+      res.writeHead(429, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      res.end(loginPage(true));
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString();
+      if (body.length > 4096) req.destroy();
+    });
+    req.on("end", () => {
+      const password = new URLSearchParams(body).get("password") ?? "";
+      if (!passwordMatches(password)) {
+        attempts.set(ip, {
+          count: rate && rate.until > now ? rate.count + 1 : 1,
+          until: now + 15 * 60_000,
+        });
+        res.writeHead(401, {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+        });
+        res.end(loginPage(true));
+        return;
+      }
+      attempts.delete(ip);
+      res.writeHead(303, {
+        location: "/",
+        "set-cookie": `${flyHubCookie}=${passwordSession()}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${sessionSeconds}`,
+        "cache-control": "no-store",
+      });
+      res.end();
+    });
+    return;
+  }
+  if (hasFlyHubPassword && url.pathname === "/_flyhub/logout") {
+    res.writeHead(303, {
+      location: "/",
+      "set-cookie": `${flyHubCookie}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
+      "cache-control": "no-store",
+    });
+    res.end();
+    return;
+  }
   if (launch) {
     if (!verifyLaunch(launch)) {
       res.writeHead(401, {
@@ -121,6 +218,18 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (!authorized(req)) {
+    if (
+      hasFlyHubPassword &&
+      req.method === "GET" &&
+      !(req.headers.accept ?? "").includes("application/json")
+    ) {
+      res.writeHead(401, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      res.end(loginPage());
+      return;
+    }
     res.writeHead(401, {
       "content-type": "application/json",
       "cache-control": "no-store",
@@ -138,9 +247,10 @@ const server = http.createServer((req, res) => {
   const upstream = http.request(
     {
       hostname: targetHost,
-      port: url.pathname === "/api" || url.pathname.startsWith("/api/")
-        ? apiTargetPort
-        : targetPort,
+      port:
+        url.pathname === "/api" || url.pathname.startsWith("/api/")
+          ? apiTargetPort
+          : targetPort,
       path: req.url,
       method: req.method,
       headers,

@@ -143,6 +143,8 @@ async function main() {
   const runtimeName =
     exposure === "private" ? runtimeAppName(appName) : appName;
   const tokenHashes = process.env.KODY_APP_TOKEN_HASHES ?? "";
+  const flyHubPasswordHash = process.env.FLY_HUB_PASSWORD_HASH ?? "";
+  const flyHubName = process.env.FLY_HUB_NAME ?? "";
   const secrets = JSON.parse(
     process.env.APP_RUNTIME_SECRETS_JSON ?? "{}",
   ) as Record<string, string>;
@@ -256,7 +258,10 @@ async function main() {
     exposure === "private" ? await listMachines(appName, flyToken) : [];
   const oldRuntime = oldRuntimeMachines[0],
     oldGateway = oldGatewayMachines.find((machine) =>
-      Boolean(machine.config?.env?.KODY_APP_TOKEN_HASHES),
+      Boolean(
+        machine.config?.env?.KODY_APP_TOKEN_HASHES ||
+        machine.config?.env?.FLY_HUB_PASSWORD_HASH,
+      ),
     );
   if (storage.length) {
     for (const volume of storage)
@@ -301,6 +306,14 @@ async function main() {
           env: {
             KODY_APP_EXPOSURE: exposure,
             KODY_APP_TOKEN_HASHES: tokenHashes,
+            ...(flyHubPasswordHash
+              ? {
+                  FLY_HUB_PASSWORD_HASH: flyHubPasswordHash,
+                  FLY_HUB_NAME: flyHubName,
+                  FLY_HUB_SOURCE_REPO: repo,
+                  FLY_HUB_COMMIT_SHA: ref,
+                }
+              : {}),
             KODY_APP_REPOSITORY: process.env.KODY_APP_REPOSITORY ?? "",
             KODY_APP_ID: process.env.KODY_APP_ID ?? "",
             KODY_APP_LAUNCH_VERIFY_KEY:
@@ -318,6 +331,16 @@ async function main() {
       await waitForMachineStarted(appName, gatewayId, flyToken);
       await uncordonMachine(appName, gatewayId, flyToken);
       await waitApplicationHealthy(`https://${appName}.fly.dev/_kody/health`);
+      if (flyHubPasswordHash) {
+        const anonymous = await fetch(`https://${appName}.fly.dev/`, {
+          redirect: "manual",
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (anonymous.status !== 401)
+          throw new Error(
+            "APP_PASSWORD_GATE_FAILED: anonymous request was not blocked",
+          );
+      }
       await notify("verifying", {
         runtimeMachineId: machineId,
         gatewayMachineId: gatewayId,
@@ -378,6 +401,16 @@ async function main() {
                 KODY_APP_EXPOSURE: "private",
                 KODY_APP_TOKEN_HASHES:
                   oldGateway?.config?.env?.KODY_APP_TOKEN_HASHES ?? tokenHashes,
+                ...(flyHubPasswordHash
+                  ? {
+                      FLY_HUB_PASSWORD_HASH:
+                        oldGateway?.config?.env?.FLY_HUB_PASSWORD_HASH ??
+                        flyHubPasswordHash,
+                      FLY_HUB_NAME: flyHubName,
+                      FLY_HUB_SOURCE_REPO: repo,
+                      FLY_HUB_COMMIT_SHA: ref,
+                    }
+                  : {}),
                 KODY_APP_REPOSITORY: process.env.KODY_APP_REPOSITORY ?? "",
                 KODY_APP_ID: process.env.KODY_APP_ID ?? "",
                 KODY_APP_LAUNCH_VERIFY_KEY:
