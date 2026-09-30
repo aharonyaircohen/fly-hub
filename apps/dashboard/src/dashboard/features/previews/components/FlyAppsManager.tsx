@@ -795,9 +795,17 @@ export function FlyAppsManager() {
                   </p>
                 )}
                 {agentApp.buildStatus === "failed" && agentApp.buildError && (
-                  <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs text-destructive">
-                    {agentApp.buildError}
-                  </pre>
+                  <div className="space-y-1 text-destructive">
+                    <p className="text-sm font-medium">
+                      {agentApp.buildError.trim().split("\n").at(-1)}
+                    </p>
+                    <details>
+                      <summary className="cursor-pointer text-sm">Builder and runtime logs</summary>
+                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">
+                        {agentApp.buildError}
+                      </pre>
+                    </details>
+                  </div>
                 )}
                 <p>{agentProgress?.explanation ?? "Checking app status…"}</p>
                 {agentApp.password && (
