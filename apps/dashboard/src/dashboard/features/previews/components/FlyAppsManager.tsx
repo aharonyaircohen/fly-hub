@@ -87,7 +87,7 @@ type EveFailure = { code?: number; message?: string; data?: {
   eveCode?: string; errorId?: string; semanticErrorId?: string;
   vercelDeploymentId?: string; hint?: string; name?: string;
 } };
-type EveTrace = { events: Array<{ index: number; at: string; type: string; summary: string }>; totalEvents: number };
+type EveTrace = { events: Array<{ index: number; at: string; type: string; summary: string }>; nextOffset: number; hasMore: boolean };
 const runHistoryKey = "flyhub:eve-app-runs";
 type EveInputRequest = {
   requestId: string;
@@ -141,6 +141,7 @@ export function FlyAppsManager() {
   const [agentFailure, setAgentFailure] = useState<string | null>(null);
   const [agentFailureDetails, setAgentFailureDetails] = useState<EveFailure["data"] | null>(null);
   const [agentTrace, setAgentTrace] = useState<EveTrace | null>(null);
+  const traceCursor = useRef({ handle: "", offset: 0 });
   const [agentRefresh, setAgentRefresh] = useState(0);
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentMode, setAgentMode] = useState<string | null>(null);
@@ -223,9 +224,14 @@ export function FlyAppsManager() {
 
   useEffect(() => {
     if (!agentHandle) return;
+    if (traceCursor.current.handle !== agentHandle) {
+      traceCursor.current = { handle: agentHandle, offset: 0 };
+      setAgentTrace(null);
+    }
     let active = true;
     async function refresh() {
       try {
+        const requestedOffset = traceCursor.current.offset;
         const data = await json<{
           status: string;
           mode?: string;
@@ -244,7 +250,7 @@ export function FlyAppsManager() {
           authorization?: unknown;
         }>(
           await fetch(
-            `/api/fly-hub/apps/agent?handle=${encodeURIComponent(agentHandle!)}&trace=1`,
+            `/api/fly-hub/apps/agent?handle=${encodeURIComponent(agentHandle!)}&trace=1&traceOffset=${requestedOffset}`,
             { cache: "no-store" },
           ),
         );
@@ -255,7 +261,14 @@ export function FlyAppsManager() {
         setAgentStartedAt(data.startedAt ?? null);
         setAgentCheckedAt(data.checkedAt ?? Date.now());
         setAgentProgress(data.progress ?? null);
-        setAgentTrace(data.trace ?? null);
+        if (data.trace && traceCursor.current.handle === agentHandle) {
+          traceCursor.current.offset = data.trace.nextOffset;
+          setAgentTrace((current) => ({
+            ...data.trace!,
+            events: [...(requestedOffset ? current?.events ?? [] : []), ...data.trace!.events].slice(-80),
+          }));
+          if (data.trace.hasMore) window.setTimeout(() => setAgentRefresh((value) => value + 1), 0);
+        }
         setAgentMachines(data.machines ?? null);
         setAgentApp(data.app ?? null);
         if (data.result != null) setAgentResult(data.result);
@@ -735,7 +748,7 @@ export function FlyAppsManager() {
             )}
             {agentTrace?.events.length ? (
               <details className="rounded border bg-background p-3 text-xs" open={agentState === "failed"}>
-                <summary className="cursor-pointer font-semibold">Eve run timeline ({agentTrace.totalEvents} events)</summary>
+                <summary className="cursor-pointer font-semibold">Eve run timeline (through event {agentTrace.nextOffset}{agentTrace.hasMore ? ", loading more…" : ""})</summary>
                 <ol className="mt-2 space-y-1">
                   {agentTrace.events.map((event) => <li key={event.index}>
                     <time className="text-muted-foreground">{new Date(event.at).toLocaleTimeString()}</time>{" "}

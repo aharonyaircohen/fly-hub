@@ -306,10 +306,12 @@ export async function GET(req: NextRequest) {
         },
       };
     });
+    const traceOffset = Number(req.nextUrl.searchParams.get("traceOffset") ?? "0");
     const trace = req.nextUrl.searchParams.get("trace") === "1"
       ? await callEveStudioTool("agent_events", {
           agentId: handle.agentId,
           invocationId: handle.invocationId,
+          offset: Number.isSafeInteger(traceOffset) && traceOffset >= 0 ? traceOffset : 0,
         }).catch(() => null)
       : null;
     if (handle.taskGrant) {
