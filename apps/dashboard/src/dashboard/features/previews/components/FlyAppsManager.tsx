@@ -710,7 +710,21 @@ export function FlyAppsManager() {
           <div className="rounded-lg border bg-muted/30 p-4 space-y-2 text-sm">
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-semibold">{agentMode === "deployment" ? "Run status" : "Eve deployment plan"}</h3>
-              <Button type="button" variant="outline" disabled={busy !== null} onClick={() => setAgentRefresh((value) => value + 1)}>Refresh status</Button>
+              <div className="flex gap-2">
+                <Button type="button" variant="outline" disabled={busy !== null} onClick={() => setAgentRefresh((value) => value + 1)}>Refresh status</Button>
+                {agentState && !["completed", "failed", "cancelled"].includes(agentState) && (
+                  <Button type="button" variant="outline" disabled={busy !== null} onClick={() => {
+                    setBusy("cancel");
+                    void fetch("/api/fly-hub/apps/agent", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ action: "cancel", handle: agentHandle }),
+                    }).then((response) => json<{ ok: boolean }>(response)).then(() => setAgentRefresh((value) => value + 1))
+                      .catch((cause) => setError(cause instanceof Error ? cause.message : "Could not cancel run."))
+                      .finally(() => setBusy(null));
+                  }}>Cancel run</Button>
+                )}
+              </div>
             </div>
             {agentRunId && <p><strong>Run ID:</strong> <code className="select-all">{agentRunId}</code></p>}
             <p><a className="underline" href={`/fly/apps#run=${encodeURIComponent(agentHandle)}`}>Link to this run</a> <span className="text-muted-foreground">(requires your Fly sign-in)</span></p>
