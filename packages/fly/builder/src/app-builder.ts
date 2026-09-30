@@ -378,7 +378,7 @@ async function main() {
       image,
       ...(plan.startCommand &&
       (plan.kind === "dockerfile" || plan.kind === "fly")
-        ? { cmd: ["sh", "-lc", plan.startCommand] }
+        ? { cmd: ["sh", "-c", plan.startCommand] }
         : {}),
       internalPort: plan.port ?? 3000,
       additionalPorts: plan.apiPort ? [plan.apiPort] : undefined,
@@ -472,6 +472,20 @@ async function main() {
       });
     }
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("APP_HEALTH_CHECK_FAILED")
+    ) {
+      try {
+        await runOutput(
+          "flyctl",
+          ["logs", "--no-tail", "--app", runtimeName, "--machine", machineId],
+          { env: { FLY_API_TOKEN: flyToken } },
+        );
+      } catch (logError) {
+        console.error("[app-builder] could not collect runtime logs", logError);
+      }
+    }
     if (gatewayId) await destroyMachine(appName, gatewayId, flyToken);
     await destroyMachine(runtimeName, machineId, flyToken);
     if (storage.length && oldRuntime?.config?.image) {
@@ -573,7 +587,7 @@ main().catch(async (error) => {
     const token = process.env.FLY_API_TOKEN;
     if (app && machine && token) {
       let detail =
-        `${error instanceof Error ? error.message : String(error)}\n${recentOutput}`.slice(
+        `${recentOutput.slice(-7_500)}\n${error instanceof Error ? error.message : String(error)}`.slice(
           -8_000,
         );
       let secrets: Record<string, string> = {};
