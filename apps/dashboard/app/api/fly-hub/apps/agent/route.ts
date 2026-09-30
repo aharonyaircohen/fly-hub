@@ -338,7 +338,7 @@ export async function GET(req: NextRequest) {
         throw new Error("This Eve deployment task has expired.");
       const [owner, repo] = task.repository.split("/");
       const appName = flyHubAppName(task.orgSlug, owner, repo, ".");
-      const [machines, runtimeMachines, pendingStatus] = await Promise.all([
+      const [machines, runtimeMachines, pendingCandidate] = await Promise.all([
         listMachines(appName, auth.cfg),
         listMachines(runtimeAppName(appName), auth.cfg),
         getPreviewBuilderStatus(
@@ -347,6 +347,12 @@ export async function GET(req: NextRequest) {
           process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder",
         ),
       ]);
+      // A retry uses the same Fly app. Ignore a builder left by an earlier run
+      // until this run creates its own builder machine.
+      const pendingStatus = pendingCandidate?.createdAt && handle.startedAt &&
+        Date.parse(pendingCandidate.createdAt) < handle.startedAt
+        ? null
+        : pendingCandidate;
       const gateway = machines.find(
         (machine) => machine.config?.env?.FLY_HUB_PASSWORD_HASH,
       );
