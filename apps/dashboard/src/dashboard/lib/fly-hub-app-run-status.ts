@@ -36,7 +36,7 @@ export function machineEventReason(event?: FlyMachineEvent): string | null {
 
 export function appRunStage(input: {
   eveStatus: string;
-  builderState?: "building" | "failed" | null;
+  builderState?: "building" | "completed" | "failed" | null;
   gatewayState?: string | null;
   runtimeState?: string | null;
   eveError?: string | null;
@@ -57,6 +57,8 @@ export function appRunStage(input: {
     };
   if (input.builderState === "building")
     return { stage: "building", explanation: "A temporary Fly builder machine is building the app." };
+  if (input.builderState === "completed")
+    return { stage: "starting", explanation: "The build finished. Fly is starting the app machines and checking their health." };
   if (input.builderState === "failed")
     return input.eveStatus === "working"
       ? { stage: "retrying", explanation: "The Fly build failed. Eve is inspecting the error and may retry." }

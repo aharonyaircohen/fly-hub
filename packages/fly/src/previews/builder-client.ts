@@ -140,7 +140,7 @@ export interface SpawnAppBuilderInput {
 }
 
 export interface PreviewBuilderStatus {
-  state: "building" | "failed";
+  state: "building" | "completed" | "failed";
   error?: string;
   machineId?: string;
   machineState?: string;
@@ -276,7 +276,18 @@ export async function getPreviewBuilderStatus(
     const latest = machines[0];
     if (!latest) return null;
     const now = Date.now();
-    const state = isReusableBuilder(latest, now) ? "building" : "failed";
+    let state: PreviewBuilderStatus["state"] = isReusableBuilder(latest, now) ? "building" : "failed";
+    let exitCode: number | undefined;
+    if (state !== "building" && latest.id) {
+      const machine = await fetch(builderMachinesUrl(latest.id, hostApp), {
+        headers: builderAuthHeaders(token),
+        signal: AbortSignal.timeout(BUILDER_MAINTENANCE_TIMEOUT_MS),
+      }).then(async (response) => response.ok ? await response.json() as {
+        events?: Array<{ type?: string; request?: { exit_event?: { exit_code?: number } } }>;
+      } : null, () => null);
+      exitCode = machine?.events?.find((event) => event.type === "exit")?.request?.exit_event?.exit_code;
+      if (exitCode === 0) state = "completed";
+    }
     let error: string | undefined;
     if (state === "failed" && latest.id) {
       const detail = await fetch(
@@ -294,6 +305,8 @@ export async function getPreviewBuilderStatus(
       );
       if (typeof detail?.flyhub_last_error === "string")
         error = detail.flyhub_last_error.slice(-8_000);
+      else if (typeof exitCode === "number")
+        error = `Fly builder process exited with code ${exitCode}.`;
     }
 
     return {
@@ -558,7 +571,7 @@ export async function spawnAppBuilder(
             }
           : {}),
       },
-      auto_destroy: true,
+      auto_destroy: false,
       restart: { policy: "no" },
       guest: {
         cpu_kind: "shared",

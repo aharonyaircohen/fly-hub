@@ -62,7 +62,7 @@ export async function GET(req: NextRequest) {
                 current: app.observedStatus,
                 exposure: app.exposure,
                 machines,
-                builderState: builder?.state,
+                builderState: builder?.state === "completed" ? undefined : builder?.state,
               });
               const updatedAt = new Date().toISOString();
               if (observedStatus !== app.observedStatus)

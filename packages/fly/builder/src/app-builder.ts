@@ -359,8 +359,11 @@ async function main() {
       ),
     );
   if (storage.length) {
-    for (const volume of storage)
-      await snapshotVolume(runtimeName, volume.volumeId, flyToken);
+    // Fly cannot snapshot a volume until a machine has mounted it. A new app's
+    // first volume is empty, so there is no prior state to preserve.
+    if (oldRuntimeMachines.length)
+      for (const volume of storage)
+        await snapshotVolume(runtimeName, volume.volumeId, flyToken);
     for (const prior of [...oldRuntimeMachines, ...oldGatewayMachines]) {
       const owner = oldRuntimeMachines.includes(prior) ? runtimeName : appName;
       await cordonMachine(owner, prior.id, flyToken).catch(() => undefined);
