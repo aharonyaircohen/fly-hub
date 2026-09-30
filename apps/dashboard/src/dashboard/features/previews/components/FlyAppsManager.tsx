@@ -83,6 +83,10 @@ type RunSummary = {
   progress?: RunProgress;
   checkedAt?: number;
 };
+type EveFailure = { code?: number; message?: string; data?: {
+  eveCode?: string; errorId?: string; semanticErrorId?: string;
+  vercelDeploymentId?: string; hint?: string; name?: string;
+} };
 const runHistoryKey = "flyhub:eve-app-runs";
 type EveInputRequest = {
   requestId: string;
@@ -134,6 +138,7 @@ export function FlyAppsManager() {
   const [agentProgress, setAgentProgress] = useState<RunProgress | null>(null);
   const [agentMachines, setAgentMachines] = useState<RunMachines | null>(null);
   const [agentFailure, setAgentFailure] = useState<string | null>(null);
+  const [agentFailureDetails, setAgentFailureDetails] = useState<EveFailure["data"] | null>(null);
   const [agentRefresh, setAgentRefresh] = useState(0);
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentMode, setAgentMode] = useState<string | null>(null);
@@ -188,6 +193,27 @@ export function FlyAppsManager() {
         setAgentHandle(recent[0].handle);
         setUrl(recent[0].url);
       }
+      const sharedHandle = new URLSearchParams(window.location.hash.slice(1)).get("run");
+      if (sharedHandle && sharedHandle.length <= 4_096) {
+        void fetch(`/api/fly-hub/apps/agent?handle=${encodeURIComponent(sharedHandle)}`, { cache: "no-store" })
+          .then((response) => json<{ url: string; runId: string; startedAt?: number | null; status: string; mode?: string; progress?: RunProgress; checkedAt?: number }>(response))
+          .then((data) => {
+            if (typeof data.url !== "string" || !data.url.startsWith("https://github.com/"))
+              throw new Error("This setup run has no repository URL.");
+            const imported: RunSummary = { handle: sharedHandle, url: data.url, runId: data.runId, startedAt: data.startedAt ?? null, status: data.status, mode: data.mode, progress: data.progress, checkedAt: data.checkedAt };
+            setRuns((current) => {
+              const next = [imported, ...current.filter((run) => run.handle !== sharedHandle)].slice(0, 12);
+              window.localStorage.setItem(runHistoryKey, JSON.stringify(next));
+              return next;
+            });
+            setAgentHandle(sharedHandle);
+            setUrl(data.url);
+            const cleanUrl = new URL(window.location.href);
+            cleanUrl.hash = "";
+            window.history.replaceState(window.history.state, "", cleanUrl);
+          })
+          .catch((cause) => setError(cause instanceof Error ? cause.message : "Could not open this setup run."));
+      }
     } catch {
       window.localStorage.removeItem(runHistoryKey);
     }
@@ -208,7 +234,7 @@ export function FlyAppsManager() {
           machines?: RunMachines;
           app?: EveApp;
           result: unknown;
-          error?: string | { message?: string } | null;
+          error?: string | EveFailure | null;
           plan?: EvePlan | null;
           planError?: string | null;
           inputRequests?: Record<string, EveInputRequest> | null;
@@ -238,6 +264,7 @@ export function FlyAppsManager() {
             ? data.error
             : data.error?.message || "Eve status is unavailable."
           : null);
+        setAgentFailureDetails(data.error && typeof data.error === "object" ? data.error.data ?? null : null);
         setRuns((current) => {
           const next = current.map((run) => run.handle === agentHandle
             ? {
@@ -669,6 +696,7 @@ export function FlyAppsManager() {
               <Button type="button" variant="outline" disabled={busy !== null} onClick={() => setAgentRefresh((value) => value + 1)}>Refresh status</Button>
             </div>
             {agentRunId && <p><strong>Run ID:</strong> <code className="select-all">{agentRunId}</code></p>}
+            <p><a className="underline" href={`/fly/apps#run=${encodeURIComponent(agentHandle)}`}>Link to this run</a> <span className="text-muted-foreground">(requires your Fly sign-in)</span></p>
             {agentStartedAt && <p><strong>Started:</strong> {new Date(agentStartedAt).toLocaleString()}</p>}
             {agentCheckedAt && <p className="text-muted-foreground">Last checked: {new Date(agentCheckedAt).toLocaleString()}</p>}
             {agentProgress && <p role="status"><strong>{agentProgress.stage.replaceAll("_", " ")}:</strong> {agentProgress.explanation}</p>}
@@ -691,6 +719,16 @@ export function FlyAppsManager() {
               </div>
             )}
             {agentFailure && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-destructive/10 p-3 text-destructive">{agentFailure}</pre>}
+            {agentFailureDetails && (
+              <div className="rounded border border-destructive/30 p-3 text-xs space-y-1">
+                <strong>Eve error details</strong>
+                {agentFailureDetails.name && <p>Cause: {agentFailureDetails.name}</p>}
+                {agentFailureDetails.hint && <p>Next step: {agentFailureDetails.hint}</p>}
+                {agentFailureDetails.semanticErrorId && <p>Error type: <code>{agentFailureDetails.semanticErrorId}</code></p>}
+                {agentFailureDetails.errorId && <p>Error ID: <code className="select-all">{agentFailureDetails.errorId}</code></p>}
+                {agentFailureDetails.vercelDeploymentId && <p>Eve deployment: <code className="select-all">{agentFailureDetails.vercelDeploymentId}</code></p>}
+              </div>
+            )}
             <p role="status">
               {agentState === "completed"
                 ? agentMode === "deployment"
