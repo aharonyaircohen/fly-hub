@@ -87,6 +87,7 @@ type EveFailure = { code?: number; message?: string; data?: {
   eveCode?: string; errorId?: string; semanticErrorId?: string;
   vercelDeploymentId?: string; hint?: string; name?: string;
 } };
+type EveTrace = { events: Array<{ index: number; at: string; type: string; summary: string }>; totalEvents: number };
 const runHistoryKey = "flyhub:eve-app-runs";
 type EveInputRequest = {
   requestId: string;
@@ -139,6 +140,7 @@ export function FlyAppsManager() {
   const [agentMachines, setAgentMachines] = useState<RunMachines | null>(null);
   const [agentFailure, setAgentFailure] = useState<string | null>(null);
   const [agentFailureDetails, setAgentFailureDetails] = useState<EveFailure["data"] | null>(null);
+  const [agentTrace, setAgentTrace] = useState<EveTrace | null>(null);
   const [agentRefresh, setAgentRefresh] = useState(0);
   const [agentState, setAgentState] = useState<string | null>(null);
   const [agentMode, setAgentMode] = useState<string | null>(null);
@@ -231,6 +233,7 @@ export function FlyAppsManager() {
           startedAt?: number | null;
           checkedAt?: number;
           progress?: RunProgress;
+          trace?: EveTrace | null;
           machines?: RunMachines;
           app?: EveApp;
           result: unknown;
@@ -241,7 +244,7 @@ export function FlyAppsManager() {
           authorization?: unknown;
         }>(
           await fetch(
-            `/api/fly-hub/apps/agent?handle=${encodeURIComponent(agentHandle!)}`,
+            `/api/fly-hub/apps/agent?handle=${encodeURIComponent(agentHandle!)}&trace=1`,
             { cache: "no-store" },
           ),
         );
@@ -252,6 +255,7 @@ export function FlyAppsManager() {
         setAgentStartedAt(data.startedAt ?? null);
         setAgentCheckedAt(data.checkedAt ?? Date.now());
         setAgentProgress(data.progress ?? null);
+        setAgentTrace(data.trace ?? null);
         setAgentMachines(data.machines ?? null);
         setAgentApp(data.app ?? null);
         if (data.result != null) setAgentResult(data.result);
@@ -729,6 +733,17 @@ export function FlyAppsManager() {
                 {agentFailureDetails.vercelDeploymentId && <p>Eve deployment: <code className="select-all">{agentFailureDetails.vercelDeploymentId}</code></p>}
               </div>
             )}
+            {agentTrace?.events.length ? (
+              <details className="rounded border bg-background p-3 text-xs" open={agentState === "failed"}>
+                <summary className="cursor-pointer font-semibold">Eve run timeline ({agentTrace.totalEvents} events)</summary>
+                <ol className="mt-2 space-y-1">
+                  {agentTrace.events.map((event) => <li key={event.index}>
+                    <time className="text-muted-foreground">{new Date(event.at).toLocaleTimeString()}</time>{" "}
+                    <strong>{event.type.replaceAll(".", " ")}:</strong> {event.summary}
+                  </li>)}
+                </ol>
+              </details>
+            ) : null}
             <p role="status">
               {agentState === "completed"
                 ? agentMode === "deployment"

@@ -306,6 +306,12 @@ export async function GET(req: NextRequest) {
         },
       };
     });
+    const trace = req.nextUrl.searchParams.get("trace") === "1"
+      ? await callEveStudioTool("agent_events", {
+          agentId: handle.agentId,
+          invocationId: handle.invocationId,
+        }).catch(() => null)
+      : null;
     if (handle.taskGrant) {
       const task = readFlyHubEveTask(handle.taskGrant, { allowExpired: true });
       if (
@@ -383,6 +389,7 @@ export async function GET(req: NextRequest) {
           runId: handle.invocationId,
           startedAt: handle.startedAt ?? null,
           checkedAt: Date.now(),
+          trace,
           progress,
           result: state.result ?? null,
           error: state.error ?? null,

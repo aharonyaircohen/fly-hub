@@ -29,7 +29,7 @@ function resultBody(result: McpToolResult): Record<string, unknown> {
 }
 
 export async function callEveStudioTool(
-  name: "agent_start" | "agent_get" | "agent_update",
+  name: "agent_start" | "agent_get" | "agent_update" | "agent_events",
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const token = process.env.EVE_STUDIO_MCP_TOKEN?.trim();
