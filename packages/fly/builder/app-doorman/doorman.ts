@@ -267,4 +267,68 @@ const server = http.createServer((req, res) => {
   req.pipe(upstream);
 });
 
+server.on("upgrade", (req, clientSocket, head) => {
+  if (!authorized(req)) {
+    clientSocket.end(
+      "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    );
+    return;
+  }
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const headers = {
+    ...req.headers,
+    "x-forwarded-proto": "https",
+    "x-forwarded-host": req.headers.host ?? "",
+  };
+  delete headers.authorization;
+  delete headers["x-kody-app-token"];
+  const upstream = http.request({
+    hostname: targetHost,
+    port:
+      url.pathname === "/api" || url.pathname.startsWith("/api/")
+        ? apiTargetPort
+        : targetPort,
+    path: req.url,
+    method: req.method,
+    headers,
+  });
+  upstream.on("upgrade", (response, upstreamSocket, upstreamHead) => {
+    clientSocket.write(
+      `HTTP/${response.httpVersion} ${response.statusCode} ${response.statusMessage}\r\n` +
+        response.rawHeaders.reduce(
+          (lines, value, index, all) =>
+            index % 2 === 0 ? lines + `${value}: ${all[index + 1]}\r\n` : lines,
+          "",
+        ) +
+        "\r\n",
+    );
+    if (head.length) upstreamSocket.write(head);
+    if (upstreamHead.length) clientSocket.write(upstreamHead);
+    clientSocket.on("error", () => upstreamSocket.destroy());
+    upstreamSocket.on("error", () => clientSocket.destroy());
+    clientSocket.pipe(upstreamSocket);
+    upstreamSocket.pipe(clientSocket);
+  });
+  upstream.on("response", (response) => {
+    clientSocket.write(
+      `HTTP/${response.httpVersion} ${response.statusCode} ${response.statusMessage}\r\n` +
+        response.rawHeaders.reduce(
+          (lines, value, index, all) =>
+            index % 2 === 0 ? lines + `${value}: ${all[index + 1]}\r\n` : lines,
+          "",
+        ) +
+        "\r\n",
+    );
+    response.pipe(clientSocket);
+  });
+  upstream.on("error", () => {
+    if (!clientSocket.destroyed)
+      clientSocket.end(
+        "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+      );
+  });
+  clientSocket.on("error", () => upstream.destroy());
+  upstream.end();
+});
+
 server.listen(port, "0.0.0.0");
