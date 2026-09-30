@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@kody-ade/base/ui/button";
 import { Input } from "@kody-ade/base/ui/input";
+import { SavedAppsManager, type SaveAppRequest } from "./SavedAppsManager";
 
 type Plan = {
   repository: string;
@@ -163,6 +164,7 @@ export function FlyAppsManager() {
   const [rootDirectory, setRootDirectory] = useState("");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [apps, setApps] = useState<App[]>([]);
+  const [saveRequest, setSaveRequest] = useState<SaveAppRequest | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [pendingStatus, setPendingStatus] = useState<
     "building" | "failed" | null
@@ -1160,6 +1162,16 @@ export function FlyAppsManager() {
               </p>
             )}
             <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy !== null}
+                onClick={() =>
+                  setSaveRequest({ app: app.appName, nonce: Date.now() })
+                }
+              >
+                Save app
+              </Button>
               {app.passwordAvailable && (
                 <Button
                   type="button"
@@ -1201,6 +1213,7 @@ export function FlyAppsManager() {
           </div>
         ))}
       </section>
+      <SavedAppsManager saveRequest={saveRequest} />
     </div>
   );
 }
