@@ -188,8 +188,12 @@ async function main() {
     exposure === "private" ? runtimeAppName(appName) : appName;
   const tokenHashes = process.env.KODY_APP_TOKEN_HASHES ?? "";
   const flyHubPasswordHash = process.env.FLY_HUB_PASSWORD_HASH ?? "";
+  const flyHubPasswordEncrypted =
+    process.env.FLY_HUB_PASSWORD_ENCRYPTED ?? "";
   const flyHubName = process.env.FLY_HUB_NAME ?? "";
   const flyHubAppPasswordEnv = process.env.FLY_HUB_APP_PASSWORD_ENV ?? "";
+  const flyHubAppPasswordEncrypted =
+    process.env.FLY_HUB_APP_PASSWORD_ENCRYPTED ?? "";
   const secrets = JSON.parse(
     process.env.APP_RUNTIME_SECRETS_JSON ?? "{}",
   ) as Record<string, string>;
@@ -411,11 +415,17 @@ async function main() {
             ...(flyHubPasswordHash
               ? {
                   FLY_HUB_PASSWORD_HASH: flyHubPasswordHash,
+                  ...(flyHubPasswordEncrypted
+                    ? { FLY_HUB_PASSWORD_ENCRYPTED: flyHubPasswordEncrypted }
+                    : {}),
                   FLY_HUB_NAME: flyHubName,
                   FLY_HUB_SOURCE_REPO: repo,
                   FLY_HUB_COMMIT_SHA: ref,
                   ...(flyHubAppPasswordEnv
                     ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
+                    : {}),
+                  ...(flyHubAppPasswordEncrypted
+                    ? { FLY_HUB_APP_PASSWORD_ENCRYPTED: flyHubAppPasswordEncrypted }
                     : {}),
                 }
               : {}),
@@ -531,12 +541,22 @@ async function main() {
                       FLY_HUB_PASSWORD_HASH:
                         oldGateway?.config?.env?.FLY_HUB_PASSWORD_HASH ??
                         flyHubPasswordHash,
+                      ...(oldGateway?.config?.env?.FLY_HUB_PASSWORD_ENCRYPTED
+                        ? { FLY_HUB_PASSWORD_ENCRYPTED: oldGateway.config.env.FLY_HUB_PASSWORD_ENCRYPTED }
+                        : flyHubPasswordEncrypted
+                          ? { FLY_HUB_PASSWORD_ENCRYPTED: flyHubPasswordEncrypted }
+                          : {}),
                       FLY_HUB_NAME: flyHubName,
                       FLY_HUB_SOURCE_REPO: repo,
                       FLY_HUB_COMMIT_SHA: ref,
                       ...(flyHubAppPasswordEnv
                         ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
                         : {}),
+                      ...(oldGateway?.config?.env?.FLY_HUB_APP_PASSWORD_ENCRYPTED
+                        ? { FLY_HUB_APP_PASSWORD_ENCRYPTED: oldGateway.config.env.FLY_HUB_APP_PASSWORD_ENCRYPTED }
+                        : flyHubAppPasswordEncrypted
+                          ? { FLY_HUB_APP_PASSWORD_ENCRYPTED: flyHubAppPasswordEncrypted }
+                          : {}),
                     }
                   : {}),
                 KODY_APP_REPOSITORY: process.env.KODY_APP_REPOSITORY ?? "",

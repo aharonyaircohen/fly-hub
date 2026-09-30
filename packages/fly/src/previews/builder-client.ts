@@ -114,8 +114,10 @@ export interface SpawnAppBuilderInput {
   exposure: "private" | "public";
   tokenHashes: string[];
   flyHubPasswordHash?: string;
+  flyHubPasswordEncrypted?: string;
   flyHubName?: string;
   flyHubAppPasswordEnv?: string;
+  flyHubAppPasswordEncrypted?: string;
   builderHostApp?: string;
   builderImage?: string;
   runtimeSecrets: Record<string, string>;
@@ -544,9 +546,15 @@ export async function spawnAppBuilder(
         ...(input.flyHubPasswordHash
           ? {
               FLY_HUB_PASSWORD_HASH: input.flyHubPasswordHash,
+              ...(input.flyHubPasswordEncrypted
+                ? { FLY_HUB_PASSWORD_ENCRYPTED: input.flyHubPasswordEncrypted }
+                : {}),
               FLY_HUB_NAME: input.flyHubName ?? input.appName,
               ...(input.flyHubAppPasswordEnv
                 ? { FLY_HUB_APP_PASSWORD_ENV: input.flyHubAppPasswordEnv }
+                : {}),
+              ...(input.flyHubAppPasswordEncrypted
+                ? { FLY_HUB_APP_PASSWORD_ENCRYPTED: input.flyHubAppPasswordEncrypted }
                 : {}),
             }
           : {}),

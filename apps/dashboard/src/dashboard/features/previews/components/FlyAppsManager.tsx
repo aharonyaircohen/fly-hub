@@ -28,6 +28,8 @@ type App = {
   commitSha: string;
   state: string;
   url: string;
+  passwordAvailable: boolean;
+  appCredentialName: string | null;
 };
 type Pending = {
   appName: string;
@@ -166,9 +168,11 @@ export function FlyAppsManager() {
     "building" | "failed" | null
   >(null);
   const [pendingReady, setPendingReady] = useState(false);
-  const [newPassword, setNewPassword] = useState<{
+  const [visiblePassword, setVisiblePassword] = useState<{
     appName: string;
     password: string;
+    appCredential?: { name: string; password: string } | null;
+    wasReset?: boolean;
   } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -569,9 +573,9 @@ export function FlyAppsManager() {
   }
 
   async function resetPassword(appName: string) {
-    setBusy(appName);
+    setBusy(`reset:${appName}`);
     setError("");
-    setNewPassword(null);
+    setVisiblePassword(null);
     try {
       const result = await json<{ password: string }>(
         await fetch(
@@ -579,11 +583,36 @@ export function FlyAppsManager() {
           { method: "POST" },
         ),
       );
-      setNewPassword({ appName, password: result.password });
+      setVisiblePassword({ appName, password: result.password, wasReset: true });
+      setApps((current) => current.map((app) =>
+        app.appName === appName ? { ...app, passwordAvailable: true } : app,
+      ));
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Could not reset password.",
       );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function showPassword(appName: string) {
+    if (visiblePassword?.appName === appName) {
+      setVisiblePassword(null);
+      return;
+    }
+    setBusy(`show:${appName}`);
+    setError("");
+    try {
+      const result = await json<{
+        password: string;
+        appCredential: { name: string; password: string } | null;
+      }>(await fetch(`/api/fly-hub/apps/${encodeURIComponent(appName)}/password`, {
+        cache: "no-store",
+      }));
+      setVisiblePassword({ appName, ...result });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not show password.");
     } finally {
       setBusy(null);
     }
@@ -1125,24 +1154,49 @@ export function FlyAppsManager() {
             >
               {app.url}
             </a>
-            <div>
+            {!app.passwordAvailable && (
+              <p className="text-muted-foreground">
+                This app was created before password recovery. Reset its password once to make it available here.
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              {app.passwordAvailable && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy !== null}
+                  onClick={() => void showPassword(app.appName)}
+                >
+                  {busy === `show:${app.appName}` ? "Loading…" : visiblePassword?.appName === app.appName ? "Hide password" : "Show password"}
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="outline"
                 disabled={busy !== null}
                 onClick={() => void resetPassword(app.appName)}
               >
-                {busy === app.appName ? "Resetting…" : "Reset password"}
+                {busy === `reset:${app.appName}` ? "Resetting…" : "Reset password"}
               </Button>
             </div>
-            {newPassword?.appName === app.appName && (
-              <p role="status">
-                New shared password:{" "}
+            {visiblePassword?.appName === app.appName && (
+              <div role="status" className="space-y-1">
+                <p>{visiblePassword.wasReset ? "New Fly Hub password" : "Fly Hub password"}:</p>
                 <code className="select-all break-all rounded bg-muted px-2 py-1">
-                  {newPassword.password}
-                </code>{" "}
-                — save it now. Previous sessions are revoked.
-              </p>
+                  {visiblePassword.password}
+                </code>
+                {visiblePassword.wasReset && <p>Previous Fly Hub passwords and sessions were revoked.</p>}
+                {visiblePassword.appCredential && (
+                  <p>App login password ({visiblePassword.appCredential.name}):{" "}
+                    <code className="select-all break-all rounded bg-muted px-2 py-1">
+                      {visiblePassword.appCredential.password}
+                    </code>
+                  </p>
+                )}
+                {app.appCredentialName && !visiblePassword.appCredential && (
+                  <p className="text-muted-foreground">This app also has its own login. Its password is available in the original setup run.</p>
+                )}
+              </div>
             )}
           </div>
         ))}

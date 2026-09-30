@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { encrypt } from "@kody-ade/base/vault/crypto";
 import { NextRequest, NextResponse } from "next/server";
 import {
   flyHubAppName,
@@ -47,6 +48,8 @@ export async function GET(req: NextRequest) {
           commitSha: env.FLY_HUB_COMMIT_SHA || "",
           state: gateway.state,
           url: `https://${appName}.fly.dev`,
+          passwordAvailable: Boolean(env.FLY_HUB_PASSWORD_ENCRYPTED),
+          appCredentialName: env.FLY_HUB_APP_PASSWORD_ENV || null,
         };
       }),
     );
@@ -410,9 +413,11 @@ export async function POST(req: NextRequest) {
       exposure: "private",
       tokenHashes: [],
       flyHubPasswordHash: passwordHash,
+      flyHubPasswordEncrypted: encrypt(password),
       flyHubName: inspected.name,
       flyHubAppPasswordEnv:
         evePlan?.appPasswordEnv ?? taskBuild?.appPasswordEnv,
+      flyHubAppPasswordEncrypted: appPassword ? encrypt(appPassword) : undefined,
       builderHostApp: builderHost(),
       builderImage,
       runtimeSecrets,
