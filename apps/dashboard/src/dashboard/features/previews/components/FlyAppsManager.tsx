@@ -31,6 +31,7 @@ type App = {
   url: string;
   passwordAvailable: boolean;
   appCredentialName: string | null;
+  alwaysOn: boolean;
 };
 type Pending = {
   appName: string;
@@ -79,6 +80,7 @@ type RunSummary = {
   handle: string;
   url: string;
   prompt?: string;
+  alwaysOn?: boolean;
   runId: string;
   startedAt: number | null;
   status: string;
@@ -141,6 +143,7 @@ export function FlyAppsManager() {
   const [activeTab, setActiveTab] = useState<AppTab>("create");
   const [url, setUrl] = useState("");
   const [setupPrompt, setSetupPrompt] = useState("");
+  const [alwaysOn, setAlwaysOn] = useState(false);
   const [agentHandle, setAgentHandle] = useState<string | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [agentRunId, setAgentRunId] = useState<string | null>(null);
@@ -208,15 +211,16 @@ export function FlyAppsManager() {
       if (recent[0]) {
         setAgentHandle(recent[0].handle);
         setUrl(recent[0].url);
+        setAlwaysOn(recent[0].alwaysOn === true);
       }
       const sharedHandle = new URLSearchParams(window.location.hash.slice(1)).get("run");
       if (sharedHandle && sharedHandle.length <= 4_096) {
         void fetch(`/api/fly-hub/apps/agent?handle=${encodeURIComponent(sharedHandle)}`, { cache: "no-store" })
-          .then((response) => json<{ url: string; runId: string; startedAt?: number | null; status: string; mode?: string; progress?: RunProgress; checkedAt?: number }>(response))
+          .then((response) => json<{ url: string; runId: string; startedAt?: number | null; status: string; mode?: string; progress?: RunProgress; checkedAt?: number; alwaysOn?: boolean }>(response))
           .then((data) => {
             if (typeof data.url !== "string" || !data.url.startsWith("https://github.com/"))
               throw new Error("This setup run has no repository URL.");
-            const imported: RunSummary = { handle: sharedHandle, url: data.url, runId: data.runId, startedAt: data.startedAt ?? null, status: data.status, mode: data.mode, progress: data.progress, checkedAt: data.checkedAt };
+            const imported: RunSummary = { handle: sharedHandle, url: data.url, runId: data.runId, startedAt: data.startedAt ?? null, status: data.status, mode: data.mode, progress: data.progress, checkedAt: data.checkedAt, alwaysOn: data.alwaysOn };
             setRuns((current) => {
               const next = [imported, ...current.filter((run) => run.handle !== sharedHandle)].slice(0, 12);
               window.localStorage.setItem(runHistoryKey, JSON.stringify(next));
@@ -224,6 +228,7 @@ export function FlyAppsManager() {
             });
             setAgentHandle(sharedHandle);
             setUrl(data.url);
+            setAlwaysOn(data.alwaysOn === true);
             const cleanUrl = new URL(window.location.href);
             cleanUrl.hash = "";
             window.history.replaceState(window.history.state, "", cleanUrl);
@@ -409,7 +414,7 @@ export function FlyAppsManager() {
     }
   }
 
-  async function planWithEve(repository = url, prompt = setupPrompt) {
+  async function planWithEve(repository = url, prompt = setupPrompt, keepRunning = alwaysOn) {
     setBusy("agent");
     setError("");
     setUrl(repository);
@@ -444,7 +449,7 @@ export function FlyAppsManager() {
         await fetch("/api/fly-hub/apps/agent", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: repository, prompt }),
+          body: JSON.stringify({ url: repository, prompt, alwaysOn: keepRunning }),
         }),
       );
       setAgentHandle(result.handle);
@@ -452,6 +457,7 @@ export function FlyAppsManager() {
         handle: result.handle,
         url: repository,
         prompt,
+        alwaysOn: keepRunning,
         runId: result.runId,
         startedAt: result.startedAt,
         status: result.status,
@@ -488,6 +494,7 @@ export function FlyAppsManager() {
             url,
             rootDirectory,
             commitSha: plan.commitSha,
+            alwaysOn,
           }),
         }),
       );
@@ -566,6 +573,7 @@ export function FlyAppsManager() {
     setAgentHandle(run.handle);
     setUrl(run.url);
     setSetupPrompt(run.prompt ?? "");
+    setAlwaysOn(run.alwaysOn === true);
     setAgentState(run.status);
     setAgentMode(run.mode ?? null);
     setAgentRunId(run.runId || null);
@@ -777,6 +785,20 @@ export function FlyAppsManager() {
           />
         </label>
         <div className="flex flex-wrap gap-2">
+          <label className="flex w-full items-start gap-3 rounded-md border p-3 text-sm">
+            <input
+              type="checkbox"
+              checked={alwaysOn}
+              onChange={(event) => setAlwaysOn(event.target.checked)}
+              className="mt-1"
+            />
+            <span>
+              <span className="block font-medium">Always on</span>
+              <span className="text-muted-foreground">
+                Keep the app running when nobody is using it. Continuous running costs apply. When off, the app sleeps when idle and wakes when opened.
+              </span>
+            </span>
+          </label>
           <Button
             type="button"
             disabled={!url.trim() || busy !== null}
@@ -1203,6 +1225,9 @@ export function FlyAppsManager() {
                 {app.state}
               </span>
             </div>
+            <p className="text-muted-foreground">
+              {app.alwaysOn ? "Always on" : "Sleeps when idle"}
+            </p>
             <p className="text-muted-foreground">
               {app.repository} · {app.commitSha.slice(0, 12)}
             </p>

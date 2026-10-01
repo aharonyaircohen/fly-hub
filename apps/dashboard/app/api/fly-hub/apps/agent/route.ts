@@ -36,6 +36,7 @@ type Handle = {
   requiredSecretNames?: string[];
   taskGrant?: string;
   startedAt?: number;
+  alwaysOn?: boolean;
   expiresAt: number;
 };
 
@@ -75,6 +76,7 @@ export async function POST(req: NextRequest) {
     responses?: unknown;
     url?: unknown;
     prompt?: unknown;
+    alwaysOn?: unknown;
   } | null;
   if (body?.action === "cancel") {
     try {
@@ -197,6 +199,7 @@ export async function POST(req: NextRequest) {
   if (
     typeof body?.url !== "string" ||
     body.url.length > 500 ||
+    (body.alwaysOn !== undefined && typeof body.alwaysOn !== "boolean") ||
     (body.prompt !== undefined &&
       (typeof body.prompt !== "string" || body.prompt.length > 5_000))
   )
@@ -228,6 +231,7 @@ export async function POST(req: NextRequest) {
       orgSlug: auth.cfg.orgSlug,
       repository: inspected.repository,
       commitSha,
+      alwaysOn: body.alwaysOn === true,
     });
     const message = [
       "Set up the main web app from this GitHub repository on Fly Hub. Inspect the repository and make one deployment attempt. If the deploy tool immediately rejects the build instructions, correct them and retry once.",
@@ -235,6 +239,7 @@ export async function POST(req: NextRequest) {
       `Repository: ${repository}`,
       `Pinned commit: ${commitSha}`,
       `User request: ${body.prompt?.trim() || "Deploy the main web interface and explain how to use it."}`,
+      `Availability: ${body.alwaysOn === true ? "Always on. Fly Hub will keep both app machines running when idle." : "Sleep when idle. Fly Hub will wake the app when someone opens it."} Fly Hub applies this machine setting directly; do not change it in your build instructions.`,
       `Initial file inspection: ${JSON.stringify(inspected)}`,
       "Use the Fly Hub connection tools flyhub_task_inspect and flyhub_task_deploy. The user already authorized deployment by choosing Set up and deploy for this repository. Do not ask for another deployment approval in your text or through ask_question. Do not return a JSON plan for Fly Hub to interpret. Inspect repository files in your sandbox as needed. If the repo's Dockerfile is unsuitable, provide a replacement Dockerfile to the deploy tool. Call flyhub_task_deploy when ready. After it starts a builder, stop calling tools and finish your run; Fly Hub monitors the build and machine health on its Apps page. Do not repeatedly call flyhub_task_status while the build is in progress. Never print the Fly Hub connection token or any generated password; Fly Hub displays passwords directly to the user. Do not ask for secret values in Eve chat. If a missing third-party API key is essential, tell the user its environment variable name. Explain the expected app URL, how to log in after Fly Hub shows Ready, and any remaining setup. Clearly say the URL is pending until Fly Hub reports Ready.",
     ].join("\n\n");
@@ -256,6 +261,7 @@ export async function POST(req: NextRequest) {
         commitSha,
         taskGrant,
         startedAt,
+        alwaysOn: body.alwaysOn === true,
         expiresAt: startedAt + 30 * 24 * 60 * 60 * 1_000,
       } satisfies Handle),
     );
@@ -410,6 +416,7 @@ export async function GET(req: NextRequest) {
           status: state.status,
           runId: handle.invocationId,
           startedAt: handle.startedAt ?? null,
+          alwaysOn: task.alwaysOn,
           checkedAt: Date.now(),
           trace,
           progress,

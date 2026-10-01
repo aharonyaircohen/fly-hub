@@ -50,6 +50,7 @@ export async function GET(req: NextRequest) {
           url: `https://${appName}.fly.dev`,
           passwordAvailable: Boolean(env.FLY_HUB_PASSWORD_ENCRYPTED),
           appCredentialName: env.FLY_HUB_APP_PASSWORD_ENV || null,
+          alwaysOn: env.FLY_HUB_ALWAYS_ON === "1",
         };
       }),
     );
@@ -101,11 +102,13 @@ export async function POST(req: NextRequest) {
     runtimeSecrets?: unknown;
     taskGrant?: unknown;
     taskBuild?: unknown;
+    alwaysOn?: unknown;
   } | null;
   const fromEve = typeof body?.eveHandle === "string";
   const fromTask = typeof body?.taskGrant === "string";
   if (
     !body ||
+    (body.alwaysOn !== undefined && typeof body.alwaysOn !== "boolean") ||
     (fromTask
       ? (body.taskGrant as string).length > 4_096
       : fromEve
@@ -125,6 +128,7 @@ export async function POST(req: NextRequest) {
     let evePlan: EveAppPlan | null = null;
     let taskBuild: FlyHubTaskBuild | null = null;
     const task = fromTask ? readFlyHubEveTask(body.taskGrant as string) : null;
+    let alwaysOn = task?.alwaysOn ?? (body.alwaysOn === true);
     if (fromTask) {
       if (
         !task ||
@@ -159,6 +163,7 @@ export async function POST(req: NextRequest) {
           body.eveHandle as string,
           auth.cfg.orgSlug,
         );
+        alwaysOn = handle.alwaysOn === true;
         if (!handle.commitSha)
           throw new Error(
             "Eve could not pin a repository commit. Inspect it again.",
@@ -411,6 +416,7 @@ export async function POST(req: NextRequest) {
       imageTag: inspected.commitSha.slice(0, 12),
       buildPlan,
       exposure: "private",
+      alwaysOn,
       tokenHashes: [],
       flyHubPasswordHash: passwordHash,
       flyHubPasswordEncrypted: encrypt(password),

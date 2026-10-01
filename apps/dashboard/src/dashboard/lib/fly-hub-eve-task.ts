@@ -10,6 +10,7 @@ const taskSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   commitSha: z.string().regex(/^[a-f0-9]{40}$/),
   passwordSeed: z.string().regex(/^[a-f0-9]{64}$/),
+  alwaysOn: z.boolean().default(false),
   expiresAt: z.number().int(),
 });
 
@@ -20,6 +21,7 @@ export function issueFlyHubEveTask(input: {
   orgSlug: string;
   repository: string;
   commitSha: string;
+  alwaysOn?: boolean;
 }) {
   const task = taskSchema.parse({
     version: 1,

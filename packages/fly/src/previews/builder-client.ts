@@ -112,6 +112,7 @@ export interface SpawnAppBuilderInput {
     verification?: { path: string; expectedStatus: number };
   };
   exposure: "private" | "public";
+  alwaysOn?: boolean;
   tokenHashes: string[];
   flyHubPasswordHash?: string;
   flyHubPasswordEncrypted?: string;
@@ -534,6 +535,7 @@ export async function spawnAppBuilder(
       image: input.builderImage ?? BUILDER_IMAGE,
       env: {
         KODY_BUILDER_KIND: "app",
+        APP_ALWAYS_ON: input.alwaysOn ? "1" : "0",
         REPO: input.repo,
         REF: input.ref,
         APP_NAME: input.appName,

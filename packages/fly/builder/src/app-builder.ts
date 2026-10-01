@@ -182,6 +182,7 @@ async function main() {
     imageTag = required("IMAGE_TAG"),
     flyToken = required("FLY_API_TOKEN");
   const plan = JSON.parse(required("APP_BUILD_PLAN_JSON")) as Plan;
+  const alwaysOn = process.env.APP_ALWAYS_ON === "1";
   const exposure =
     process.env.KODY_APP_EXPOSURE === "public" ? "public" : "private";
   const runtimeName =
@@ -394,6 +395,7 @@ async function main() {
       })),
       env: runtimeEnv,
       processGroup: "app",
+      idleSuspend: !alwaysOn,
     },
     flyToken,
   );
@@ -409,6 +411,7 @@ async function main() {
           image: gatewayImage!,
           internalPort: 8080,
           processGroup: "gateway",
+          idleSuspend: !alwaysOn,
           env: {
             KODY_APP_EXPOSURE: exposure,
             KODY_APP_TOKEN_HASHES: tokenHashes,
@@ -419,6 +422,7 @@ async function main() {
                     ? { FLY_HUB_PASSWORD_ENCRYPTED: flyHubPasswordEncrypted }
                     : {}),
                   FLY_HUB_NAME: flyHubName,
+                  FLY_HUB_ALWAYS_ON: alwaysOn ? "1" : "0",
                   FLY_HUB_SOURCE_REPO: repo,
                   FLY_HUB_COMMIT_SHA: ref,
                   ...(flyHubAppPasswordEnv
@@ -519,6 +523,7 @@ async function main() {
               path: volume.mountPath,
             })),
             processGroup: "app",
+            idleSuspend: oldGateway?.config?.env?.FLY_HUB_ALWAYS_ON !== "1",
           },
           flyToken,
         );
@@ -532,6 +537,7 @@ async function main() {
               image: oldGateway?.config?.image ?? gatewayImage!,
               internalPort: 8080,
               processGroup: "gateway",
+              idleSuspend: oldGateway?.config?.env?.FLY_HUB_ALWAYS_ON !== "1",
               env: {
                 KODY_APP_EXPOSURE: "private",
                 KODY_APP_TOKEN_HASHES:
@@ -547,6 +553,7 @@ async function main() {
                           ? { FLY_HUB_PASSWORD_ENCRYPTED: flyHubPasswordEncrypted }
                           : {}),
                       FLY_HUB_NAME: flyHubName,
+                      FLY_HUB_ALWAYS_ON: oldGateway?.config?.env?.FLY_HUB_ALWAYS_ON ?? "0",
                       FLY_HUB_SOURCE_REPO: repo,
                       FLY_HUB_COMMIT_SHA: ref,
                       ...(flyHubAppPasswordEnv
