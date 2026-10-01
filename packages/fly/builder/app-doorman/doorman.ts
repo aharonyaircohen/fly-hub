@@ -94,20 +94,13 @@ function cookie(req: http.IncomingMessage, name: string) {
   return "";
 }
 
-function tokenFrom(req: http.IncomingMessage): string {
+function bearerToken(req: http.IncomingMessage): string {
   const authorization = req.headers.authorization ?? "";
-  if (/^Bearer\s+/i.test(authorization))
-    return authorization.replace(/^Bearer\s+/i, "").trim();
-  const header = req.headers["x-kody-app-token"];
-  return Array.isArray(header) ? (header[0] ?? "") : (header ?? "");
+  return /^Bearer\s+/i.test(authorization)
+    ? authorization.replace(/^Bearer\s+/i, "").trim()
+    : "";
 }
-
-function authorized(req: http.IncomingMessage): boolean {
-  if (isPublic) return true;
-  if (hasFlyHubPassword && validPasswordSession(cookie(req, flyHubCookie)))
-    return true;
-  if (verifyLaunch(cookie(req, cookieName))) return true;
-  const token = tokenFrom(req);
+function matchesAccessToken(token: string): boolean {
   if (!token) return false;
   const actual = crypto.createHash("sha256").update(token).digest();
   for (const hash of hashes) {
@@ -119,6 +112,42 @@ function authorized(req: http.IncomingMessage): boolean {
       return true;
   }
   return false;
+}
+
+function authorized(req: http.IncomingMessage): boolean {
+  if (isPublic) return true;
+  if (hasFlyHubPassword && validPasswordSession(cookie(req, flyHubCookie)))
+    return true;
+  if (verifyLaunch(cookie(req, cookieName))) return true;
+  const header = req.headers["x-kody-app-token"];
+  return (
+    matchesAccessToken(bearerToken(req)) ||
+    matchesAccessToken(
+      Array.isArray(header) ? (header[0] ?? "") : (header ?? ""),
+    )
+  );
+}
+
+// Remove only this gateway's credentials. The app keeps its own login headers.
+function forwardedHeaders(req: http.IncomingMessage): http.OutgoingHttpHeaders {
+  const headers: http.OutgoingHttpHeaders = {
+    ...req.headers,
+    "x-forwarded-proto": "https",
+    "x-forwarded-host": req.headers.host ?? "",
+  };
+  if (matchesAccessToken(bearerToken(req))) delete headers.authorization;
+  delete headers["x-kody-app-token"];
+  const cookies = (req.headers.cookie ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => {
+      const name = part.split("=", 1)[0];
+      return part && name !== flyHubCookie && name !== cookieName;
+    })
+    .join("; ");
+  if (cookies) headers.cookie = cookies;
+  else delete headers.cookie;
+  return headers;
 }
 
 const server = http.createServer((req, res) => {
@@ -237,13 +266,7 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ error: "app_access_token_required" }));
     return;
   }
-  const headers = {
-    ...req.headers,
-    "x-forwarded-proto": "https",
-    "x-forwarded-host": req.headers.host ?? "",
-  };
-  delete headers.authorization;
-  delete headers["x-kody-app-token"];
+  const headers = forwardedHeaders(req);
   const upstream = http.request(
     {
       hostname: targetHost,
@@ -275,13 +298,7 @@ server.on("upgrade", (req, clientSocket, head) => {
     return;
   }
   const url = new URL(req.url ?? "/", "http://localhost");
-  const headers = {
-    ...req.headers,
-    "x-forwarded-proto": "https",
-    "x-forwarded-host": req.headers.host ?? "",
-  };
-  delete headers.authorization;
-  delete headers["x-kody-app-token"];
+  const headers = forwardedHeaders(req);
   const upstream = http.request({
     hostname: targetHost,
     port:

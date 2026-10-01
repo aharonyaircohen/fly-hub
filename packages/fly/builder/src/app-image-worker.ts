@@ -822,6 +822,8 @@ async function create() {
           APP_TARGET_HOST: `${runtime}.flycast`,
         };
         delete config.env.KODY_APP_LAUNCH_VERIFY_KEY;
+        // Restore the saved application, with the current FlyHub gateway fix.
+        config.files = [{ guest_path: "/app/app-doorman/doorman.ts", raw_value: (await readFile("/app/app-doorman/doorman.ts")).toString("base64") }];
       }
       if (Object.keys(saved.secrets).length)
         await run(

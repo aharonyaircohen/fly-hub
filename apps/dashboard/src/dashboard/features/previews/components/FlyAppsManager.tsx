@@ -1219,7 +1219,7 @@ export function FlyAppsManager() {
                   ? "The builder stopped before the app became available. Check its Fly machine logs, then inspect and deploy again."
                   : "This may take a few minutes. The URL will work after the build and health check complete."}
             </p>
-            {pendingDetail?.error && <p className="text-destructive">{pendingDetail.error}</p>}
+            {pendingDetail?.error && (pendingStatus === "cancelled" ? <details><summary className="cursor-pointer">Job details</summary><pre className="whitespace-pre-wrap break-all mt-2">{pendingDetail.error}</pre></details> : <p className="text-destructive">{pendingDetail.error}</p>)}
             {pendingDetail?.cleanup && <p><strong>Cleanup ({pendingDetail.cleanup.status.replaceAll("_", " ")}):</strong> {pendingDetail.cleanup.detail}</p>}
             {pending.workerId && !pendingReady && !["failed", "cancelled", "cancelling"].includes(pendingStatus ?? "") && <Button type="button" variant="outline" disabled={busy !== null} onClick={() => {
               setBusy("cancel-setup");
@@ -1227,6 +1227,7 @@ export function FlyAppsManager() {
                 .then((response) => json<{status: string; message: string}>(response)).then((data) => { setPendingStatus(data.status === "cancelling" ? "cancelling" : data.status === "cancelled" ? "cancelled" : "completed"); setNotice(data.message); })
                 .catch((cause) => setError(cause instanceof Error ? cause.message : "Could not cancel setup.")).finally(() => setBusy(null));
             }}>Cancel setup</Button>}
+            {!["failed", "cancelled", "cancelling"].includes(pendingStatus ?? "") && <>
             <a
               href={pending.url}
               target="_blank"
@@ -1255,6 +1256,7 @@ export function FlyAppsManager() {
             {pending.instructions && (
               <p className="whitespace-pre-wrap">{pending.instructions}</p>
             )}
+            </>}
           </div>
         )}
       </section>
