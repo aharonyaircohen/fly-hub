@@ -182,7 +182,7 @@ export async function listFailedAppSetups(
       )
         return [];
       seen.add(appName);
-      if (meta.flyhub_build_status !== "failed") return [];
+      if (meta.flyhub_build_status !== "failed" && !(meta.flyhub_build_status === "cancelled" && meta.flyhub_cleanup_status === "needs_attention")) return [];
       return [
         {
           appName,

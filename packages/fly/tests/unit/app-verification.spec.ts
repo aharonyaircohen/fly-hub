@@ -120,3 +120,13 @@ describe("app deployment verification", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 });
+
+it("stops verification promptly when cancellation interrupts a pending response", async () => {
+  const server = http.createServer(() => {});
+  const port = await listen(server), cancellation = new AbortController();
+  const verification = waitForAppVerification({ origin: `http://127.0.0.1:${port}`, verification: {path:"/",expectedStatus:200}, signal:cancellation.signal, attempts:30 });
+  setTimeout(() => cancellation.abort(new Error("APP_SETUP_CANCELLED")), 50);
+  await expect(verification).rejects.toThrow("APP_SETUP_CANCELLED");
+  server.closeAllConnections();
+  await new Promise<void>(resolve => server.close(() => resolve()));
+});

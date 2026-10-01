@@ -3,7 +3,7 @@ import {
   requestAppCancellation,
   isAppTaskCancelled,
 } from "../../src/hub/app-cancellation";
-import { getPreviewBuilderStatus } from "../../src/previews/builder-client";
+import { listFailedAppSetups, getPreviewBuilderStatus } from "../../src/previews/builder-client";
 const mocks = vi.hoisted(() => ({ machines: vi.fn() }));
 vi.mock("../../src/plugin/previews/machines-client", () => ({
   listMachines: mocks.machines,
@@ -128,4 +128,9 @@ describe("app cancellation", () => {
     });
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+});
+
+it("exposes a cancelled setup whose cleanup needs attention", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json([{ id: "cancelled", created_at: new Date().toISOString(), config: {metadata: {flyhub_build_app:appName,flyhub_build_org:cfg.orgSlug,flyhub_build_status:"cancelled",flyhub_cleanup_status:"needs_attention",flyhub_cleanup_detail:"Runtime remains"}}}])));
+  expect(await listFailedAppSetups(cfg.token,cfg.orgSlug,"host")).toEqual([expect.objectContaining({jobId:"cancelled",cleanup:{status:"needs_attention",detail:"Runtime remains"}})]);
 });

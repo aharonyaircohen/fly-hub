@@ -39,7 +39,7 @@ export async function deleteFlyHubApp(app: string, cfg: FlyPreviewConfig) {
     return (
       metadata.flyhub_build_app === app &&
       metadata.flyhub_build_org === cfg.orgSlug &&
-      metadata.flyhub_build_status === "failed"
+      (metadata.flyhub_build_status === "failed" || (metadata.flyhub_build_status === "cancelled" && metadata.flyhub_cleanup_status === "needs_attention"))
     );
   });
   if (!gateway && !failedSetup)
@@ -101,7 +101,7 @@ export async function deleteFlyHubApp(app: string, cfg: FlyPreviewConfig) {
           "kody-preview-builder",
         machine: failedSetup.id,
         token: cfg.token,
-        status: "failed",
+        status: failedSetup.config?.metadata?.flyhub_build_status === "cancelled" ? "cancelled" : "failed",
         metadata: {
           flyhub_cleanup_status: "completed",
           flyhub_cleanup_detail:
