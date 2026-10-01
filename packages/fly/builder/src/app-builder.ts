@@ -10,12 +10,14 @@ import {
   createPreviewMachine,
   destroyMachine,
   listMachines,
-  snapshotVolume,
+  destroyVolume,
   startMachine,
   stopMachine,
   uncordonMachine,
   waitForMachineStarted,
+  waitForMachineStopped,
 } from "./fly-api.ts";
+import { replaceAppDeployment } from "./app-deployment-transaction.ts";
 import { appDeployConfig } from "./app-deploy-config.ts";
 import { runtimeAppName } from "./app-builder-names.ts";
 import { clearAppBuilderCredentials } from "./app-builder-cleanup.ts";
@@ -35,6 +37,7 @@ const exists = async (path: string) =>
     () => false,
   );
 let recentOutput = "";
+const previousSecretValues: string[] = [];
 function rememberOutput(value: string) {
   recentOutput = (recentOutput + value).slice(-12_000);
 }
@@ -73,7 +76,11 @@ function run(
 function runOutput(
   command: string,
   args: string[],
-  options: { cwd?: string; env?: Record<string, string> } = {},
+  options: {
+    cwd?: string;
+    env?: Record<string, string>;
+    sensitive?: boolean;
+  } = {},
 ): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
@@ -84,11 +91,13 @@ function runOutput(
     let output = "";
     child.stdout.on("data", (chunk: Buffer) => {
       output += chunk.toString();
-      rememberOutput(chunk.toString());
+      if (!options.sensitive) rememberOutput(chunk.toString());
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      rememberOutput(chunk.toString());
-      process.stderr.write(chunk);
+      if (!options.sensitive) {
+        rememberOutput(chunk.toString());
+        process.stderr.write(chunk);
+      }
     });
     child.on("error", reject);
     child.on("exit", (code) =>
@@ -251,6 +260,14 @@ async function main() {
     await allocateSharedIps(appName, flyToken);
     await allocatePrivateIp(runtimeName, flyToken);
   } else await allocateSharedIps(runtimeName, flyToken);
+  const oldRuntimeMachines = await listMachines(runtimeName, flyToken);
+  const oldGatewayMachines =
+    exposure === "private" ? await listMachines(appName, flyToken) : [];
+  const previousVolumeIds = new Set(
+    oldRuntimeMachines.flatMap(
+      (machine) => machine.config?.mounts?.map((mount) => mount.volume) ?? [],
+    ),
+  );
   if (plan.storagePath && !storage.length) {
     const env = { FLY_API_TOKEN: flyToken };
     const existing = JSON.parse(
@@ -260,7 +277,11 @@ async function main() {
         { env },
       ),
     ) as Array<{ id?: string; name?: string }>;
-    let volumeId = existing.find((volume) => volume.name === "flyhub_data")?.id;
+    let volumeId = existing.find(
+      (volume) => volume.id && previousVolumeIds.has(volume.id),
+    )?.id;
+    if (!oldRuntimeMachines.length)
+      volumeId ??= existing.find((volume) => volume.name === "flyhub_data")?.id;
     if (!volumeId) {
       const created = JSON.parse(
         await runOutput(
@@ -286,20 +307,6 @@ async function main() {
     if (!volumeId)
       throw new Error("Could not create the app's storage volume.");
     storage.push({ volumeId, mountPath: plan.storagePath });
-  }
-  if (Object.keys(secrets).length) {
-    const input =
-      Object.entries(secrets)
-        .map(([key, value]) => `${key}=${value}`)
-        .join("\n") + "\n";
-    await run(
-      "flyctl",
-      ["secrets", "import", "--stage", "--app", runtimeName],
-      {
-        input,
-        env: { FLY_API_TOKEN: flyToken },
-      },
-    );
   }
   const image = plan.imageRef ?? `registry.fly.io/${runtimeName}:${imageTag}`;
   const args = [
@@ -353,271 +360,308 @@ async function main() {
       },
     );
   }
-  const oldRuntimeMachines = await listMachines(runtimeName, flyToken);
-  const oldGatewayMachines =
-    exposure === "private" ? await listMachines(appName, flyToken) : [];
-  const oldRuntime = oldRuntimeMachines[0],
-    oldGateway = oldGatewayMachines.find((machine) =>
-      Boolean(
-        machine.config?.env?.KODY_APP_TOKEN_HASHES ||
-        machine.config?.env?.FLY_HUB_PASSWORD_HASH,
+  // Only read declared app secrets, and never send secret-bearing output to logs.
+  const previousSecrets: Record<string, string> = {};
+  const addedSecretNames: string[] = [];
+  if (oldRuntimeMachines.length && Object.keys(secrets).length) {
+    const secretNames = JSON.parse(
+      await runOutput(
+        "flyctl",
+        ["secrets", "list", "--app", runtimeName, "--json"],
+        { env: { FLY_API_TOKEN: flyToken }, sensitive: true },
       ),
+    ) as Array<{ Name?: string; name?: string }>;
+    const names = new Set(secretNames.map((item) => item.Name ?? item.name));
+    const changedExisting = Object.keys(secrets).filter((name) =>
+      names.has(name),
     );
-  if (storage.length) {
-    // Fly cannot snapshot a volume until a machine has mounted it. A new app's
-    // first volume is empty, so there is no prior state to preserve.
-    if (oldRuntimeMachines.length)
-      for (const volume of storage)
-        await snapshotVolume(runtimeName, volume.volumeId, flyToken);
-    for (const prior of [...oldRuntimeMachines, ...oldGatewayMachines]) {
-      const owner = oldRuntimeMachines.includes(prior) ? runtimeName : appName;
-      await cordonMachine(owner, prior.id, flyToken).catch(() => undefined);
-      await stopMachine(owner, prior.id, flyToken).catch(() => undefined);
-      await destroyMachine(owner, prior.id, flyToken);
+    addedSecretNames.push(
+      ...Object.keys(secrets).filter((name) => !names.has(name)),
+    );
+    if (changedExisting.length) {
+      const source =
+        oldRuntimeMachines.find((machine) => machine.state === "started") ??
+        oldRuntimeMachines[0]!;
+      if (source.state !== "started") {
+        await startMachine(runtimeName, source.id, flyToken);
+        await waitForMachineStarted(runtimeName, source.id, flyToken);
+      }
+      const output = await runOutput(
+        "flyctl",
+        [
+          "ssh",
+          "console",
+          "--app",
+          runtimeName,
+          "--machine",
+          source.id,
+          "--command",
+          "env -0",
+        ],
+        { env: { FLY_API_TOKEN: flyToken }, sensitive: true },
+      );
+      const environment = new Map(
+        output
+          .split("\0")
+          .filter((line) => line.includes("="))
+          .map((line) => [
+            line.slice(0, line.indexOf("=")),
+            line.slice(line.indexOf("=") + 1),
+          ]),
+      );
+      for (const name of changedExisting) {
+        const value = environment.get(name);
+        if (value === undefined)
+          throw new Error(
+            `Cannot safely update: previous value of secret ${name} could not be read. Existing deployment was left intact.`,
+          );
+        previousSecrets[name] = value;
+        previousSecretValues.push(value);
+      }
     }
   }
-  const machineId = await createPreviewMachine(
-    {
-      appName: runtimeName,
-      region: process.env.FLY_REGION ?? "fra",
-      image,
-      ...(plan.startCommand &&
-      (plan.kind === "dockerfile" || plan.kind === "fly")
-        ? { cmd: ["sh", "-c", plan.startCommand] }
-        : {}),
-      internalPort: plan.port ?? 3000,
-      additionalPorts: plan.apiPort ? [plan.apiPort] : undefined,
-      publicServices: true,
-      healthCheck: true,
-      mounts: storage.map((volume) => ({
-        volumeId: volume.volumeId,
-        path: volume.mountPath,
-      })),
-      env: runtimeEnv,
-      processGroup: "app",
-      idleSuspend: !alwaysOn,
-    },
-    flyToken,
-  );
+  const importSecrets = async (values: Record<string, string>) => {
+    if (!Object.keys(values).length) return;
+    await run(
+      "flyctl",
+      ["secrets", "import", "--stage", "--app", runtimeName],
+      {
+        input:
+          Object.entries(values)
+            .map(([key, value]) => `${key}=${value}`)
+            .join("\n") + "\n",
+        env: { FLY_API_TOKEN: flyToken },
+      },
+    );
+  };
+  let machineId: string | undefined;
   let gatewayId: string | undefined;
-  try {
-    await startMachine(runtimeName, machineId, flyToken);
-    await waitForMachineStarted(runtimeName, machineId, flyToken);
-    if (exposure === "private") {
-      gatewayId = await createPreviewMachine(
-        {
-          appName,
-          region: process.env.FLY_REGION ?? "fra",
-          image: gatewayImage!,
-          internalPort: 8080,
-          processGroup: "gateway",
-          idleSuspend: !alwaysOn,
-          env: {
-            KODY_APP_EXPOSURE: exposure,
-            KODY_APP_TOKEN_HASHES: tokenHashes,
-            ...(flyHubPasswordHash
-              ? {
-                  FLY_HUB_PASSWORD_HASH: flyHubPasswordHash,
-                  ...(flyHubPasswordEncrypted
-                    ? { FLY_HUB_PASSWORD_ENCRYPTED: flyHubPasswordEncrypted }
-                    : {}),
-                  FLY_HUB_NAME: flyHubName,
-                  FLY_HUB_ALWAYS_ON: alwaysOn ? "1" : "0",
-                  FLY_HUB_SOURCE_REPO: repo,
-                  FLY_HUB_COMMIT_SHA: ref,
-                  ...(flyHubAppPasswordEnv
-                    ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
-                    : {}),
-                  ...(flyHubAppPasswordEncrypted
-                    ? {
-                        FLY_HUB_APP_PASSWORD_ENCRYPTED:
-                          flyHubAppPasswordEncrypted,
-                      }
-                    : {}),
-                }
-              : {}),
-            KODY_APP_REPOSITORY: process.env.KODY_APP_REPOSITORY ?? "",
-            KODY_APP_ID: process.env.KODY_APP_ID ?? "",
-            KODY_APP_LAUNCH_VERIFY_KEY:
-              process.env.KODY_APP_LAUNCH_VERIFY_KEY ?? "",
-            APP_TARGET_HOST: `${runtimeName}.flycast`,
-            APP_INTERNAL_PORT: "80",
-            ...(plan.apiPort
-              ? { APP_API_INTERNAL_PORT: String(plan.apiPort) }
-              : {}),
-          },
-        },
-        flyToken,
-      );
-      await startMachine(appName, gatewayId, flyToken);
-      await waitForMachineStarted(appName, gatewayId, flyToken);
-      await uncordonMachine(appName, gatewayId, flyToken);
-      await waitApplicationHealthy(`https://${appName}.fly.dev/_kody/health`);
-      if (flyHubPasswordHash) {
-        const anonymous = await fetch(`https://${appName}.fly.dev/`, {
-          redirect: "manual",
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (anonymous.status !== 401)
+  await replaceAppDeployment({
+    previous: [
+      ...oldGatewayMachines.map((machine) => ({ app: appName, ...machine })),
+      ...oldRuntimeMachines.map((machine) => ({
+        app: runtimeName,
+        ...machine,
+      })),
+    ],
+    storage,
+    previousVolumeIds,
+    actions: {
+      cordon: (machine) => cordonMachine(machine.app, machine.id, flyToken),
+      stop: async (machine) => {
+        if (machine.state === "stopped") return;
+        await stopMachine(machine.app, machine.id, flyToken);
+        await waitForMachineStopped(machine.app, machine.id, flyToken);
+      },
+      resume: async (machine) => {
+        await startMachine(machine.app, machine.id, flyToken);
+        await waitForMachineStarted(machine.app, machine.id, flyToken);
+        await uncordonMachine(machine.app, machine.id, flyToken);
+      },
+      destroy: (machine) => destroyMachine(machine.app, machine.id, flyToken),
+      fork: async (volume) => {
+        const copied = JSON.parse(
+          await runOutput(
+            "flyctl",
+            [
+              "volumes",
+              "fork",
+              volume.volumeId,
+              "--app",
+              runtimeName,
+              "--name",
+              "flyhub_data",
+              "--json",
+            ],
+            { env: { FLY_API_TOKEN: flyToken } },
+          ),
+        ) as { id?: string } | Array<{ id?: string }>;
+        const volumeId = Array.isArray(copied) ? copied[0]?.id : copied.id;
+        if (!volumeId)
           throw new Error(
-            "APP_PASSWORD_GATE_FAILED: anonymous request was not blocked",
+            "Could not copy the app's data volume. Previous data remains intact.",
           );
-      }
-      await notify("verifying", {
-        runtimeMachineId: machineId,
-        gatewayMachineId: gatewayId,
-        imageRef: image,
-      });
-      await waitForAppVerification({
-        origin: `https://${appName}.fly.dev`,
-        verification: plan.verification ?? { path: "/", expectedStatus: 200 },
-        privateAccess: {
-          repository: required("KODY_APP_REPOSITORY"),
-          appId: required("KODY_APP_ID"),
-          verifyKey: Buffer.from(required("KODY_APP_LAUNCH_VERIFY_KEY"), "hex"),
-        },
-      });
-    } else {
-      await uncordonMachine(appName, machineId, flyToken);
-      await notify("verifying", {
-        runtimeMachineId: machineId,
-        imageRef: image,
-      });
-      await waitForAppVerification({
-        origin: `https://${appName}.fly.dev`,
-        verification: plan.verification ?? { path: "/", expectedStatus: 200 },
-      });
-    }
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.startsWith("APP_HEALTH_CHECK_FAILED")
-    ) {
-      try {
-        await runOutput(
-          "flyctl",
-          ["logs", "--no-tail", "--app", runtimeName, "--machine", machineId],
-          { env: { FLY_API_TOKEN: flyToken } },
-        );
-      } catch (logError) {
-        console.error("[app-builder] could not collect runtime logs", logError);
-      }
-    }
-    if (gatewayId) await destroyMachine(appName, gatewayId, flyToken);
-    await destroyMachine(runtimeName, machineId, flyToken);
-    if (storage.length && oldRuntime?.config?.image) {
-      try {
-        const restored = await createPreviewMachine(
-          {
-            appName: runtimeName,
-            region: oldRuntime.region ?? process.env.FLY_REGION ?? "fra",
-            image: oldRuntime.config.image,
-            ...(oldRuntime.config?.init?.cmd
-              ? { cmd: oldRuntime.config.init.cmd }
-              : {}),
-            internalPort:
-              oldRuntime.config?.services?.[0]?.internal_port ??
-              plan.port ??
-              3000,
-            additionalPorts: plan.apiPort ? [plan.apiPort] : undefined,
-            publicServices: true,
-            mounts: storage.map((volume) => ({
-              volumeId: volume.volumeId,
-              path: volume.mountPath,
-            })),
-            processGroup: "app",
-            idleSuspend: oldGateway?.config?.env?.FLY_HUB_ALWAYS_ON !== "1",
-          },
-          flyToken,
-        );
-        await startMachine(runtimeName, restored, flyToken);
-        await waitForMachineStarted(runtimeName, restored, flyToken);
-        if (exposure === "private") {
-          const restoredGateway = await createPreviewMachine(
+        return { ...volume, volumeId };
+      },
+      destroyVolume: (volume) =>
+        destroyVolume(runtimeName, volume.volumeId, flyToken),
+      applySecrets: () => importSecrets(secrets),
+      restoreSecrets: async () => {
+        if (addedSecretNames.length)
+          await run(
+            "flyctl",
+            [
+              "secrets",
+              "unset",
+              "--stage",
+              "--app",
+              runtimeName,
+              ...addedSecretNames,
+            ],
+            { env: { FLY_API_TOKEN: flyToken } },
+          );
+        await importSecrets(previousSecrets);
+      },
+      verifyRecovery: () =>
+        waitApplicationHealthy(
+          `https://${appName}.fly.dev${exposure === "private" ? "/_kody/health" : "/"}`,
+        ),
+      report: (message) => {
+        console.log(`[app-builder] ${message}`);
+        rememberOutput(message + "\n");
+      },
+      deploy: async (candidateStorage, register) => {
+        try {
+          machineId = await createPreviewMachine(
             {
-              appName,
-              region: oldGateway?.region ?? process.env.FLY_REGION ?? "fra",
-              image: oldGateway?.config?.image ?? gatewayImage!,
-              internalPort: 8080,
-              processGroup: "gateway",
-              idleSuspend: oldGateway?.config?.env?.FLY_HUB_ALWAYS_ON !== "1",
-              env: {
-                KODY_APP_EXPOSURE: "private",
-                KODY_APP_TOKEN_HASHES:
-                  oldGateway?.config?.env?.KODY_APP_TOKEN_HASHES ?? tokenHashes,
-                ...(flyHubPasswordHash
-                  ? {
-                      FLY_HUB_PASSWORD_HASH:
-                        oldGateway?.config?.env?.FLY_HUB_PASSWORD_HASH ??
-                        flyHubPasswordHash,
-                      ...(oldGateway?.config?.env?.FLY_HUB_PASSWORD_ENCRYPTED
-                        ? {
-                            FLY_HUB_PASSWORD_ENCRYPTED:
-                              oldGateway.config.env.FLY_HUB_PASSWORD_ENCRYPTED,
-                          }
-                        : flyHubPasswordEncrypted
+              appName: runtimeName,
+              region: process.env.FLY_REGION ?? "fra",
+              image,
+              ...(plan.startCommand &&
+              (plan.kind === "dockerfile" || plan.kind === "fly")
+                ? { cmd: ["sh", "-c", plan.startCommand] }
+                : {}),
+              internalPort: plan.port ?? 3000,
+              additionalPorts: plan.apiPort ? [plan.apiPort] : undefined,
+              publicServices: true,
+              healthCheck: true,
+              mounts: candidateStorage.map((volume) => ({
+                volumeId: volume.volumeId,
+                path: volume.mountPath,
+              })),
+              env: runtimeEnv,
+              processGroup: "app",
+              idleSuspend: !alwaysOn,
+            },
+            flyToken,
+          );
+          register({ app: runtimeName, id: machineId, state: "created" });
+          await startMachine(runtimeName, machineId, flyToken);
+          await waitForMachineStarted(runtimeName, machineId, flyToken);
+          if (exposure === "private") {
+            gatewayId = await createPreviewMachine(
+              {
+                appName,
+                region: process.env.FLY_REGION ?? "fra",
+                image: gatewayImage!,
+                internalPort: 8080,
+                processGroup: "gateway",
+                idleSuspend: !alwaysOn,
+                env: {
+                  KODY_APP_EXPOSURE: exposure,
+                  KODY_APP_TOKEN_HASHES: tokenHashes,
+                  ...(flyHubPasswordHash
+                    ? {
+                        FLY_HUB_PASSWORD_HASH: flyHubPasswordHash,
+                        ...(flyHubPasswordEncrypted
                           ? {
                               FLY_HUB_PASSWORD_ENCRYPTED:
                                 flyHubPasswordEncrypted,
                             }
                           : {}),
-                      FLY_HUB_NAME: flyHubName,
-                      FLY_HUB_ALWAYS_ON:
-                        oldGateway?.config?.env?.FLY_HUB_ALWAYS_ON ?? "0",
-                      FLY_HUB_SOURCE_REPO: repo,
-                      FLY_HUB_COMMIT_SHA: ref,
-                      ...(flyHubAppPasswordEnv
-                        ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
-                        : {}),
-                      ...(oldGateway?.config?.env
-                        ?.FLY_HUB_APP_PASSWORD_ENCRYPTED
-                        ? {
-                            FLY_HUB_APP_PASSWORD_ENCRYPTED:
-                              oldGateway.config.env
-                                .FLY_HUB_APP_PASSWORD_ENCRYPTED,
-                          }
-                        : flyHubAppPasswordEncrypted
+                        FLY_HUB_NAME: flyHubName,
+                        FLY_HUB_ALWAYS_ON: alwaysOn ? "1" : "0",
+                        FLY_HUB_SOURCE_REPO: repo,
+                        FLY_HUB_COMMIT_SHA: ref,
+                        ...(flyHubAppPasswordEnv
+                          ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
+                          : {}),
+                        ...(flyHubAppPasswordEncrypted
                           ? {
                               FLY_HUB_APP_PASSWORD_ENCRYPTED:
                                 flyHubAppPasswordEncrypted,
                             }
                           : {}),
-                    }
-                  : {}),
-                KODY_APP_REPOSITORY: process.env.KODY_APP_REPOSITORY ?? "",
-                KODY_APP_ID: process.env.KODY_APP_ID ?? "",
-                KODY_APP_LAUNCH_VERIFY_KEY:
-                  process.env.KODY_APP_LAUNCH_VERIFY_KEY ?? "",
-                APP_TARGET_HOST: `${runtimeName}.flycast`,
-                APP_INTERNAL_PORT: "80",
-                ...(plan.apiPort
-                  ? { APP_API_INTERNAL_PORT: String(plan.apiPort) }
-                  : {}),
+                      }
+                    : {}),
+                  KODY_APP_REPOSITORY: process.env.KODY_APP_REPOSITORY ?? "",
+                  KODY_APP_ID: process.env.KODY_APP_ID ?? "",
+                  KODY_APP_LAUNCH_VERIFY_KEY:
+                    process.env.KODY_APP_LAUNCH_VERIFY_KEY ?? "",
+                  APP_TARGET_HOST: `${runtimeName}.flycast`,
+                  APP_INTERNAL_PORT: "80",
+                  ...(plan.apiPort
+                    ? { APP_API_INTERNAL_PORT: String(plan.apiPort) }
+                    : {}),
+                },
               },
-            },
-            flyToken,
-          );
-          await startMachine(appName, restoredGateway, flyToken);
-          await waitForMachineStarted(appName, restoredGateway, flyToken);
-        } else await uncordonMachine(appName, restored, flyToken);
-      } catch (restoreError) {
-        console.error("[app-builder] stateful rollback failed", restoreError);
-      }
-    }
-    throw error;
-  }
-  if (!storage.length)
-    for (const prior of oldRuntimeMachines) {
-      await cordonMachine(runtimeName, prior.id, flyToken);
-      await stopMachine(runtimeName, prior.id, flyToken);
-      await destroyMachine(runtimeName, prior.id, flyToken);
-    }
-  if (!storage.length)
-    for (const prior of oldGatewayMachines) {
-      await cordonMachine(appName, prior.id, flyToken);
-      await stopMachine(appName, prior.id, flyToken);
-      await destroyMachine(appName, prior.id, flyToken);
-    }
+              flyToken,
+            );
+            register({ app: appName, id: gatewayId, state: "created" });
+            await startMachine(appName, gatewayId, flyToken);
+            await waitForMachineStarted(appName, gatewayId, flyToken);
+            await uncordonMachine(appName, gatewayId, flyToken);
+            await waitApplicationHealthy(
+              `https://${appName}.fly.dev/_kody/health`,
+            );
+            if (flyHubPasswordHash) {
+              const anonymous = await fetch(`https://${appName}.fly.dev/`, {
+                redirect: "manual",
+                signal: AbortSignal.timeout(5_000),
+              });
+              if (anonymous.status !== 401)
+                throw new Error(
+                  "APP_PASSWORD_GATE_FAILED: anonymous request was not blocked",
+                );
+            }
+            await notify("verifying", {
+              runtimeMachineId: machineId,
+              gatewayMachineId: gatewayId,
+              imageRef: image,
+            });
+            await waitForAppVerification({
+              origin: `https://${appName}.fly.dev`,
+              verification: plan.verification ?? {
+                path: "/",
+                expectedStatus: 200,
+              },
+              privateAccess: {
+                repository: required("KODY_APP_REPOSITORY"),
+                appId: required("KODY_APP_ID"),
+                verifyKey: Buffer.from(
+                  required("KODY_APP_LAUNCH_VERIFY_KEY"),
+                  "hex",
+                ),
+              },
+            });
+          } else {
+            await uncordonMachine(appName, machineId, flyToken);
+            await notify("verifying", {
+              runtimeMachineId: machineId,
+              imageRef: image,
+            });
+            await waitForAppVerification({
+              origin: `https://${appName}.fly.dev`,
+              verification: plan.verification ?? {
+                path: "/",
+                expectedStatus: 200,
+              },
+            });
+          }
+        } catch (error) {
+          if (machineId) {
+            try {
+              await runOutput(
+                "flyctl",
+                [
+                  "logs",
+                  "--no-tail",
+                  "--app",
+                  runtimeName,
+                  "--machine",
+                  machineId,
+                ],
+                { env: { FLY_API_TOKEN: flyToken } },
+              );
+            } catch {
+              console.error("[app-builder] could not collect runtime logs");
+            }
+          }
+          throw error;
+        }
+      },
+    },
+  });
   await notify("running", {
     runtimeMachineId: machineId,
     gatewayMachineId: gatewayId,
@@ -650,6 +694,7 @@ main()
           token,
           process.env.GITHUB_TOKEN,
           ...Object.values(secrets),
+          ...previousSecretValues,
         ])
           if (value && value.length >= 8)
             detail = detail.replaceAll(value, "[redacted]");

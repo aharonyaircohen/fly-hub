@@ -133,6 +133,7 @@ export async function listMachines(
       env?: Record<string, string>;
       init?: { cmd?: string[] };
       services?: Array<{ internal_port?: number }>;
+      mounts?: Array<{ volume: string; path: string }>;
     };
   }>
 > {
@@ -154,6 +155,7 @@ export async function listMachines(
       env?: Record<string, string>;
       init?: { cmd?: string[] };
       services?: Array<{ internal_port?: number }>;
+      mounts?: Array<{ volume: string; path: string }>;
     };
   }>;
   return data.map((m) => ({
@@ -365,6 +367,35 @@ export async function waitForMachineStarted(
     { headers: authHeader(token), signal: AbortSignal.timeout(100_000) },
   );
   await expectOk(res, "waitForMachineStarted");
+}
+
+export async function waitForMachineStopped(
+  appName: string,
+  machineId: string,
+  token: string,
+) {
+  const res = await fetch(
+    `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}/wait?state=stopped&timeout=60`,
+    { headers: authHeader(token), signal: AbortSignal.timeout(100_000) },
+  );
+  await expectOk(res, "waitForMachineStopped");
+}
+
+export async function destroyVolume(
+  appName: string,
+  volumeId: string,
+  token: string,
+) {
+  const res = await fetch(
+    `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(appName)}/volumes/${encodeURIComponent(volumeId)}`,
+    {
+      method: "DELETE",
+      headers: authHeader(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    },
+  );
+  if (res.status === 404) return;
+  await expectOk(res, "destroyVolume");
 }
 
 async function machineAction(
