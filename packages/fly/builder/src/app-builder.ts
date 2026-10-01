@@ -49,23 +49,24 @@ async function saveWorkerMetadata(values: Record<string, string>) {
     machine = process.env.FLY_MACHINE_ID,
     token = process.env.FLY_API_TOKEN;
   if (!app || !machine || !token) return;
-  for (const [name, value] of Object.entries(values)) {
-    const response = await fetch(
-      `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/${name}`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ value }),
-        signal: AbortSignal.timeout(10_000),
+  // One write per phase avoids Fly's metadata update rate limit. The final
+  // credential cleanup writes all fields together from workerMetadata.
+  const response = await fetch(
+    `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/flyhub_setup_state`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
       },
-    );
-    if (!response.ok)
-      throw new Error(`Could not record setup state: HTTP ${response.status}`);
-  }
+      body: JSON.stringify({ value: JSON.stringify(workerMetadata) }),
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+  if (!response.ok)
+    throw new Error(`Could not record setup state: HTTP ${response.status}`);
 }
+
 function rememberOutput(value: string) {
   recentOutput = (recentOutput + value).slice(-12_000);
 }
@@ -740,7 +741,11 @@ main()
         await saveWorkerMetadata({
           flyhub_cleanup_status: cleanup.status,
           flyhub_cleanup_detail: cleanup.detail,
-        });
+        }).catch(() =>
+          console.error(
+            "[app-builder] cleanup report will be saved with final worker status",
+          ),
+        );
       }
     } catch (cleanupError) {
       rememberOutput(
