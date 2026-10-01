@@ -48,7 +48,7 @@ export async function callEveStudioTool(
       params: { name, arguments: args },
     }),
     cache: "no-store",
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(["agent_get", "agent_events", "agent_cancel"].includes(name) ? 5_000 : 30_000),
   });
   if (!response.ok)
     throw new Error(`Eve Studio request failed (HTTP ${response.status}).`);
