@@ -101,7 +101,7 @@ export async function deleteFlyHubApp(app: string, cfg: FlyPreviewConfig) {
           "kody-preview-builder",
         machine: failedSetup.id,
         token: cfg.token,
-        status: failedSetup.config?.metadata?.flyhub_build_status === "cancelled" ? "cancelled" : "failed",
+        status: (failedSetup.config?.metadata as Record<string, string> | undefined)?.flyhub_build_status === "cancelled" ? "cancelled" : "failed",
         metadata: {
           flyhub_cleanup_status: "completed",
           flyhub_cleanup_detail:
