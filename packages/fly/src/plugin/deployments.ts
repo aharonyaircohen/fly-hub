@@ -60,7 +60,7 @@ async function getEmptyDeploymentInfo(
     key,
     appName,
     url: null,
-    state: builder?.state === "completed" ? "pending" : builder?.state ?? "failed",
+    state: builder?.state === "completed" ? "pending" : builder?.state === "building" || builder?.state === "cancelling" ? "building" : "failed",
     region: cfg.defaultRegion,
     builderMachineId: builder?.machineId,
   };

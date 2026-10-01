@@ -85,11 +85,10 @@ export async function replaceAppDeployment(input: {
         `DEPLOYMENT_RECOVERY_FAILED: ${error instanceof Error ? error.message : String(error)}. Recovery needs attention: ${recoveryErrors.join("; ")}`,
         { cause: error },
       );
-    actions.report(
-      previous.length
-        ? "Update failed. Previous machines, configuration, secrets, and data restored."
-        : "Deployment failed. Replacement machines removed.",
-    );
+    const cancelled = error instanceof Error && (error.message === "APP_SETUP_CANCELLED" || error.name === "AbortError");
+    actions.report(previous.length
+      ? `${cancelled ? "Setup cancelled" : "Update failed"}. Previous machines, configuration, secrets, and data restored.`
+      : `${cancelled ? "Setup cancelled" : "Deployment failed"}. Replacement machines removed.`);
     throw error;
   }
   // Verification has passed. Retirement failures must never roll back a now

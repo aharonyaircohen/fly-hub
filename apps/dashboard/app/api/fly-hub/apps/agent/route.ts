@@ -1,3 +1,4 @@
+import { isAppTaskCancelled, requestAppCancellation } from "@kody-ade/fly/hub/app-cancellation";
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, createHmac } from "node:crypto";
 import { decrypt, encrypt } from "@kody-ade/base/vault/crypto";
@@ -88,11 +89,17 @@ export async function POST(req: NextRequest) {
       if (typeof body.handle !== "string" || body.handle.length > 4_096)
         throw new Error("Invalid Eve run.");
       const handle = readEvePlanHandle(body.handle, auth.cfg.orgSlug);
-      await callEveStudioTool("agent_cancel", {
-        agentId: handle.agentId,
-        invocationId: handle.invocationId,
-      });
-      return NextResponse.json({ ok: true }, { headers: privateHeaders });
+      let cancellation: Awaited<ReturnType<typeof requestAppCancellation>> | null = null;
+      if (handle.taskGrant) {
+        const task = readFlyHubEveTask(handle.taskGrant, { allowExpired: true });
+        if (!task || task.orgSlug !== auth.cfg.orgSlug || task.token !== auth.cfg.token) throw new Error("Invalid deployment run.");
+        const [owner, repo] = task.repository.split("/");
+        cancellation = await requestAppCancellation({ cfg: auth.cfg, appName: flyHubAppName(task.orgSlug, owner, repo, "."), taskId: task.id, startedAt: handle.startedAt, ref: task.commitSha });
+      }
+      let agentWarning: string | undefined;
+      try { await callEveStudioTool("agent_cancel", { agentId: handle.agentId, invocationId: handle.invocationId }); }
+      catch (error) { if (!cancellation) throw error; agentWarning = "Fly setup cancellation was accepted. The agent could not be stopped; further deployment requests from this run are blocked."; }
+      return NextResponse.json({ ok: true, ...cancellation, agentWarning }, { status: 202, headers: privateHeaders });
     } catch (error) {
       return NextResponse.json(
         {
@@ -108,8 +115,9 @@ export async function POST(req: NextRequest) {
       if (typeof body.handle !== "string" || body.handle.length > 4_096)
         throw new Error("Invalid Eve run.");
       const handle = readEvePlanHandle(body.handle, auth.cfg.orgSlug);
-      if (!handle.taskGrant || !readFlyHubEveTask(handle.taskGrant))
-        throw new Error("This deployment run has expired. Start a new run.");
+      const task = handle.taskGrant ? readFlyHubEveTask(handle.taskGrant) : null;
+      if (!task || task.token !== auth.cfg.token || task.orgSlug !== auth.cfg.orgSlug) throw new Error("This deployment run has expired. Start a new run.");
+      if (await isAppTaskCancelled(task.id, auth.cfg)) throw new Error("This setup was cancelled.");
       const current = await callEveStudioTool("agent_get", {
         agentId: handle.agentId,
         invocationId: handle.invocationId,
@@ -405,7 +413,7 @@ export async function GET(req: NextRequest) {
       // A retry uses the same Fly app. Ignore a builder left by an earlier run
       // until this run creates its own builder machine.
       const pendingStatus =
-        pendingCandidate?.createdAt &&
+        (pendingCandidate?.taskId && pendingCandidate.taskId !== task.id) || pendingCandidate?.createdAt &&
         handle.startedAt &&
         Date.parse(pendingCandidate.createdAt) < handle.startedAt
           ? null
@@ -481,9 +489,12 @@ export async function GET(req: NextRequest) {
         sameRun &&
         gatewayEnv.FLY_HUB_COMMIT_SHA === task.commitSha &&
         pendingStatus?.state !== "building" &&
-        pendingStatus?.state !== "failed";
+        pendingStatus?.state !== "failed" &&
+        pendingStatus?.state !== "cancelling" &&
+        pendingStatus?.state !== "cancelled";
+      const taskCancelled = await isAppTaskCancelled(task.id, auth.cfg);
       const progress = appRunStage({
-        eveStatus: typeof state.status === "string" ? state.status : "working",
+        eveStatus: taskCancelled ? "cancelled" : typeof state.status === "string" ? state.status : "working",
         eveError:
           typeof state.error === "string"
             ? state.error
@@ -501,7 +512,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(
         {
           mode: "deployment",
-          status: state.status,
+          status: progress.stage === "cancelling" || progress.stage === "cancelled" ? progress.stage : state.status,
           runId: handle.invocationId,
           startedAt: handle.startedAt ?? null,
           alwaysOn: task.alwaysOn,
@@ -521,6 +532,7 @@ export async function GET(req: NextRequest) {
                   state: pendingStatus.machineState ?? null,
                   startedAt: pendingStatus.createdAt ?? null,
                   error: pendingStatus.error ?? null,
+                  cleanup: pendingStatus.cleanup ?? null,
                   reason: eventReason(
                     pendingStatus.machineState,
                     builderDiagnostic?.events,

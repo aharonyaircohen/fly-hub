@@ -24,6 +24,11 @@ import { runtimeAppName } from "./app-builder-names.ts";
 import { clearAppBuilderCredentials } from "./app-builder-cleanup.ts";
 import { cleanupFirstDeployment } from "./app-first-deployment-cleanup.ts";
 import {
+  appCancellation,
+  checkAppCancellation,
+  monitorAppCancellation,
+} from "./app-cancellation.ts";
+import {
   waitForAppVerification,
   type AppVerification,
 } from "./app-verification.ts";
@@ -73,13 +78,21 @@ function rememberOutput(value: string) {
 function run(
   command: string,
   args: string[],
-  options: { cwd?: string; env?: Record<string, string>; input?: string } = {},
+  options: {
+    cwd?: string;
+    env?: Record<string, string>;
+    input?: string;
+    ignoreCancellation?: boolean;
+  } = {},
 ): Promise<void> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
       stdio: [options.input ? "pipe" : "ignore", "pipe", "pipe"],
+      ...(!options.ignoreCancellation
+        ? { signal: appCancellation.signal }
+        : {}),
     });
     child.stdout?.on("data", (chunk: Buffer) => {
       const value = chunk.toString();
@@ -109,6 +122,7 @@ function runOutput(
     cwd?: string;
     env?: Record<string, string>;
     sensitive?: boolean;
+    ignoreCancellation?: boolean;
   } = {},
 ): Promise<string> {
   return new Promise((resolvePromise, reject) => {
@@ -116,6 +130,9 @@ function runOutput(
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
       stdio: ["ignore", "pipe", "pipe"],
+      ...(!options.ignoreCancellation
+        ? { signal: appCancellation.signal }
+        : {}),
     });
     let output = "";
     child.stdout.on("data", (chunk: Buffer) => {
@@ -191,14 +208,23 @@ async function notify(
     console.error("[app-builder] callback failed", error);
   }
 }
-async function waitApplicationHealthy(url: string) {
+async function waitApplicationHealthy(url: string, ignoreCancellation = false) {
   let last = "unreachable";
   for (let attempt = 0; attempt < 30; attempt++) {
+    if (!ignoreCancellation) checkAppCancellation();
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+      const response = await fetch(url, {
+        signal: ignoreCancellation
+          ? AbortSignal.timeout(3000)
+          : AbortSignal.any([
+              AbortSignal.timeout(3000),
+              appCancellation.signal,
+            ]),
+      });
       if (response.status < 500) return;
       last = `HTTP ${response.status}`;
     } catch (error) {
+      if (!ignoreCancellation) checkAppCancellation();
       last = error instanceof Error ? error.message : String(error);
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 2000));
@@ -338,7 +364,7 @@ async function main() {
             "--json",
             "--yes",
           ],
-          { env },
+          { env, ignoreCancellation: true },
         ),
       ) as { id?: string } | Array<{ id?: string }>;
       volumeId = Array.isArray(created) ? created[0]?.id : created.id;
@@ -465,7 +491,10 @@ async function main() {
       }
     }
   }
-  const importSecrets = async (values: Record<string, string>) => {
+  const importSecrets = async (
+    values: Record<string, string>,
+    ignoreCancellation = false,
+  ) => {
     if (!Object.keys(values).length) return;
     await run(
       "flyctl",
@@ -476,6 +505,7 @@ async function main() {
             .map(([key, value]) => `${key}=${value}`)
             .join("\n") + "\n",
         env: { FLY_API_TOKEN: flyToken },
+        ignoreCancellation,
       },
     );
   };
@@ -492,8 +522,12 @@ async function main() {
     storage,
     previousVolumeIds,
     actions: {
-      cordon: (machine) => cordonMachine(machine.app, machine.id, flyToken),
+      cordon: (machine) => {
+        checkAppCancellation();
+        return cordonMachine(machine.app, machine.id, flyToken);
+      },
       stop: async (machine) => {
+        checkAppCancellation();
         if (machine.state === "stopped") return;
         await stopMachine(machine.app, machine.id, flyToken);
         await waitForMachineStopped(machine.app, machine.id, flyToken);
@@ -505,6 +539,7 @@ async function main() {
       },
       destroy: (machine) => destroyMachine(machine.app, machine.id, flyToken),
       fork: async (volume) => {
+        checkAppCancellation();
         const copied = JSON.parse(
           await runOutput(
             "flyctl",
@@ -518,7 +553,7 @@ async function main() {
               "flyhub_data",
               "--json",
             ],
-            { env: { FLY_API_TOKEN: flyToken } },
+            { env: { FLY_API_TOKEN: flyToken }, ignoreCancellation: true },
           ),
         ) as { id?: string } | Array<{ id?: string }>;
         const volumeId = Array.isArray(copied) ? copied[0]?.id : copied.id;
@@ -530,7 +565,10 @@ async function main() {
       },
       destroyVolume: (volume) =>
         destroyVolume(runtimeName, volume.volumeId, flyToken),
-      applySecrets: () => importSecrets(secrets),
+      applySecrets: () => {
+        checkAppCancellation();
+        return importSecrets(secrets, true);
+      },
       restoreSecrets: async () => {
         if (addedSecretNames.length)
           await run(
@@ -543,13 +581,14 @@ async function main() {
               runtimeName,
               ...addedSecretNames,
             ],
-            { env: { FLY_API_TOKEN: flyToken } },
+            { env: { FLY_API_TOKEN: flyToken }, ignoreCancellation: true },
           );
-        await importSecrets(previousSecrets);
+        await importSecrets(previousSecrets, true);
       },
       verifyRecovery: () =>
         waitApplicationHealthy(
           `https://${appName}.fly.dev${exposure === "private" ? "/_kody/health" : "/"}`,
+          true,
         ),
       report: (message) => {
         console.log(`[app-builder] ${message}`);
@@ -557,6 +596,7 @@ async function main() {
       },
       deploy: async (candidateStorage, register) => {
         try {
+          checkAppCancellation();
           machineId = await createPreviewMachine(
             {
               appName: runtimeName,
@@ -581,8 +621,14 @@ async function main() {
             flyToken,
           );
           register({ app: runtimeName, id: machineId, state: "created" });
+          checkAppCancellation();
           await startMachine(runtimeName, machineId, flyToken);
-          await waitForMachineStarted(runtimeName, machineId, flyToken);
+          await waitForMachineStarted(
+            runtimeName,
+            machineId,
+            flyToken,
+            appCancellation.signal,
+          );
           if (exposure === "private") {
             gatewayId = await createPreviewMachine(
               {
@@ -633,8 +679,14 @@ async function main() {
               flyToken,
             );
             register({ app: appName, id: gatewayId, state: "created" });
+            checkAppCancellation();
             await startMachine(appName, gatewayId, flyToken);
-            await waitForMachineStarted(appName, gatewayId, flyToken);
+            await waitForMachineStarted(
+              appName,
+              gatewayId,
+              flyToken,
+              appCancellation.signal,
+            );
             await uncordonMachine(appName, gatewayId, flyToken);
             await waitApplicationHealthy(
               `https://${appName}.fly.dev/_kody/health`,
@@ -655,6 +707,7 @@ async function main() {
               imageRef: image,
             });
             await waitForAppVerification({
+              signal: appCancellation.signal,
               origin: `https://${appName}.fly.dev`,
               verification: plan.verification ?? {
                 path: "/",
@@ -676,6 +729,7 @@ async function main() {
               imageRef: image,
             });
             await waitForAppVerification({
+              signal: appCancellation.signal,
               origin: `https://${appName}.fly.dev`,
               verification: plan.verification ?? {
                 path: "/",
@@ -683,6 +737,7 @@ async function main() {
               },
             });
           }
+          checkAppCancellation();
         } catch (error) {
           if (machineId) {
             try {
@@ -696,7 +751,7 @@ async function main() {
                   "--machine",
                   machineId,
                 ],
-                { env: { FLY_API_TOKEN: flyToken } },
+                { env: { FLY_API_TOKEN: flyToken }, ignoreCancellation: true },
               );
             } catch {
               console.error("[app-builder] could not collect runtime logs");
@@ -713,10 +768,25 @@ async function main() {
     imageRef: image,
   });
 }
-let buildStatus: "completed" | "failed" = "completed";
-main()
-  .catch(async (error) => {
-    buildStatus = "failed";
+let buildStatus: "completed" | "failed" | "cancelled" = "completed";
+let stopCancellationMonitor = () => {};
+monitorAppCancellation()
+  .then((stop) => {
+    stopCancellationMonitor = stop;
+    checkAppCancellation();
+    return main();
+  })
+  .catch(async (caughtError) => {
+    const cancelled =
+      appCancellation.signal.aborted &&
+      !(
+        caughtError instanceof Error &&
+        caughtError.message.startsWith("DEPLOYMENT_RECOVERY_FAILED")
+      );
+    const error = cancelled
+      ? new Error("APP_SETUP_CANCELLED", { cause: caughtError })
+      : caughtError;
+    buildStatus = cancelled ? "cancelled" : "failed";
     console.error("[app-builder] failed", error);
     try {
       const token = process.env.FLY_API_TOKEN;
@@ -791,16 +861,18 @@ main()
       );
     }
     await notify("failed", {
-      errorCode:
-        error instanceof Error &&
-        (error.message.startsWith("APP_HEALTH_CHECK_FAILED") ||
-          error.message.startsWith("APP_VERIFICATION_"))
+      errorCode: cancelled
+        ? "cancelled"
+        : error instanceof Error &&
+            (error.message.startsWith("APP_HEALTH_CHECK_FAILED") ||
+              error.message.startsWith("APP_VERIFICATION_"))
           ? "verification_failed"
           : "deployment_failed",
     });
-    process.exitCode = 4;
+    process.exitCode = cancelled ? 0 : 4;
   })
   .finally(async () => {
+    stopCancellationMonitor();
     const app = process.env.FLY_APP_NAME;
     const machine = process.env.FLY_MACHINE_ID;
     const token = process.env.FLY_API_TOKEN;

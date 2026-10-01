@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isAppTaskCancelled, requestAppCancellation } from "@kody-ade/fly/hub/app-cancellation";
 import { encrypt } from "@kody-ade/base/vault/crypto";
 import { NextRequest, NextResponse } from "next/server";
 import {
@@ -196,6 +197,7 @@ export async function POST(req: NextRequest) {
           { error: "Invalid Eve deployment task." },
           { status: 403 },
         );
+      if (await isAppTaskCancelled(task.id, auth.cfg)) return NextResponse.json({ error: "This setup was cancelled. Start a new run to deploy." }, { status: 409, headers: { "Cache-Control": "no-store, private" } });
       const parsed = taskBuildSchema.safeParse(body.taskBuild);
       if (!parsed.success)
         return NextResponse.json(
@@ -334,10 +336,7 @@ export async function POST(req: NextRequest) {
           { status: 409 },
         );
     }
-    if (
-      (await getPreviewBuilderStatus(appName, auth.cfg.token, builderHost()))
-        ?.state === "building"
-    )
+    if (["building", "cancelling"].includes((await getPreviewBuilderStatus(appName, auth.cfg.token, builderHost()))?.state ?? ""))
       return NextResponse.json(
         { error: "This repository is already being built." },
         { status: 409 },
@@ -466,7 +465,8 @@ export async function POST(req: NextRequest) {
         { error: "Eve's plan needs a web command and port before deployment." },
         { status: 400 },
       );
-    await spawnAppBuilder({
+    const builder = await spawnAppBuilder({
+      taskId: task?.id,
       repo: inspected.repository,
       ref: inspected.commitSha,
       appName,
@@ -500,8 +500,13 @@ export async function POST(req: NextRequest) {
         verifyKey: launchKey,
       },
     });
+    if (task && await isAppTaskCancelled(task.id, auth.cfg)) {
+      await requestAppCancellation({ cfg: auth.cfg, appName, workerId: builder.machineId, taskId: task.id });
+      return NextResponse.json({ error: "This setup was cancelled. Cleanup is in progress." }, { status: 409 });
+    }
     return NextResponse.json(
       {
+        workerId: builder.machineId,
         appName,
         url: `https://${appName}.fly.dev`,
         password,
@@ -522,8 +527,8 @@ export async function POST(req: NextRequest) {
           .filter(Boolean)
           .join("\n\n"),
         message: appPassword
-          ? "Save both passwords now. Fly Hub can reset the outer gate password later; it cannot display the app login password again."
-          : "Save this password now. Fly Hub cannot display it again; you can reset it later.",
+          ? "Both passwords are also available in Deployed apps → Show password."
+          : "The password is also available in Deployed apps → Show password.",
       },
       { status: 202, headers: { "Cache-Control": "no-store, private" } },
     );

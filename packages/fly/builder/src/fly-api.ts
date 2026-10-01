@@ -223,6 +223,8 @@ export interface CreatePreviewMachineInput {
    *  in by the dashboard via builder env. Each falls back to the historical
    *  hardcoded default when unset. */
   cpus?: number;
+  cpuKind?: "shared" | "performance";
+  rootfsSizeGb?: number;
   memoryMb?: number;
   idleSuspend?: boolean;
   /** Re-enable a periodic HTTP health check. OFF by default — a check pings
@@ -279,7 +281,10 @@ export async function createPreviewMachine(
       env: input.env ?? {},
       auto_destroy: false,
       restart: { policy: "always" },
-      guest: { cpu_kind: "shared", cpus, memory_mb: memoryMb },
+      guest: { cpu_kind: input.cpuKind ?? "shared", cpus, memory_mb: memoryMb },
+      ...(input.rootfsSizeGb
+        ? { rootfs: { size_gb: input.rootfsSizeGb } }
+        : {}),
       ...(input.publicServices === false
         ? {}
         : {
@@ -362,10 +367,11 @@ export async function waitForMachineStarted(
   appName: string,
   machineId: string,
   token: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(
     `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}/wait?state=started&timeout=60`,
-    { headers: authHeader(token), signal: AbortSignal.timeout(100_000) },
+    { headers: authHeader(token), signal: signal ? AbortSignal.any([AbortSignal.timeout(100_000), signal]) : AbortSignal.timeout(100_000) },
   );
   await expectOk(res, "waitForMachineStarted");
 }

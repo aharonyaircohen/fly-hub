@@ -40,6 +40,7 @@ type FailedSetup = {
   cleanup: { status: string; detail: string };
 };
 type Pending = {
+  workerId?: string;
   appName: string;
   url: string;
   password: string;
@@ -78,7 +79,7 @@ type RunProgress = { stage: string; explanation: string };
 type MachineEvent = { type: string; status: string; source: string; timestamp: number; exitCode?: number; oomKilled?: boolean };
 type RunMachine = { id: string; state: string; region?: string; reason?: string | null; events?: MachineEvent[] };
 type RunMachines = {
-  builder: { id: string | null; state: string | null; startedAt: string | null; error: string | null; reason?: string | null; events?: MachineEvent[] } | null;
+  builder: { id: string | null; state: string | null; startedAt: string | null; error: string | null; cleanup?: { status: string; detail: string } | null; reason?: string | null; events?: MachineEvent[] } | null;
   gateway: RunMachine | null;
   runtime: RunMachine | null;
 };
@@ -185,8 +186,9 @@ export function FlyAppsManager() {
   const [saveRequest, setSaveRequest] = useState<SaveAppRequest | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [pendingStatus, setPendingStatus] = useState<
-    "building" | "failed" | null
+    "building" | "completed" | "failed" | "cancelling" | "cancelled" | null
   >(null);
+  const [pendingDetail, setPendingDetail] = useState<{ error?: string; cleanup?: {status: string; detail: string} } | null>(null);
   const [pendingReady, setPendingReady] = useState(false);
   const [visiblePassword, setVisiblePassword] = useState<{
     appName: string;
@@ -379,7 +381,7 @@ export function FlyAppsManager() {
           apps: App[];
           failedSetups?: FailedSetup[];
           historyError?: string | null;
-          pendingStatus: { state: "building" | "failed" } | null;
+          pendingStatus: { state: "building" | "completed" | "failed" | "cancelling" | "cancelled"; error?: string; cleanup?: {status: string; detail: string} } | null;
           pendingReady: boolean;
         }>(
           await fetch(
@@ -392,6 +394,7 @@ export function FlyAppsManager() {
           setFailedSetups(data.failedSetups ?? []);
           setHistoryError(data.historyError ?? null);
           setPendingStatus(data.pendingStatus?.state ?? null);
+          setPendingDetail(data.pendingStatus);
           setPendingReady(data.pendingReady);
         }
       } catch (cause) {
@@ -867,14 +870,14 @@ export function FlyAppsManager() {
               <h3 className="font-semibold">{agentMode === "deployment" ? "Run status" : "Eve deployment plan"}</h3>
               <div className="flex gap-2">
                 <Button type="button" variant="outline" disabled={busy !== null} onClick={() => setAgentRefresh((value) => value + 1)}>Refresh status</Button>
-                {agentState && !["completed", "failed", "cancelled"].includes(agentState) && (
+                {agentState && agentState !== "cancelling" && ((!["completed", "failed", "cancelled"].includes(agentState)) || agentProgress?.stage === "building" || agentProgress?.stage === "starting") && (
                   <Button type="button" variant="outline" disabled={busy !== null} onClick={() => {
                     setBusy("cancel");
                     void fetch("/api/fly-hub/apps/agent", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ action: "cancel", handle: agentHandle }),
-                    }).then((response) => json<{ ok: boolean }>(response)).then(() => setAgentRefresh((value) => value + 1))
+                    }).then((response) => json<{ ok: boolean; status?: string; message?: string; agentWarning?: string }>(response)).then((data) => { setAgentState(data.status ?? "cancelled"); setNotice(data.agentWarning || data.message || "Cancellation requested."); setAgentRefresh((value) => value + 1); })
                       .catch((cause) => setError(cause instanceof Error ? cause.message : "Could not cancel run."))
                       .finally(() => setBusy(null));
                   }}>Cancel run</Button>
@@ -892,6 +895,7 @@ export function FlyAppsManager() {
                 <p><strong>Fly builder:</strong> {agentMachines?.builder
                   ? `${agentMachines.builder.state ?? "unknown"} (${agentMachines.builder.id ?? "unknown ID"})`
                   : "Not created"}</p>
+                {agentMachines?.builder?.cleanup && <p><strong>Cleanup ({agentMachines.builder.cleanup.status.replaceAll("_", " ")}):</strong> {agentMachines.builder.cleanup.detail}</p>}
                 {agentMachines?.builder?.reason && <p className="text-muted-foreground">{agentMachines.builder.reason}</p>}
                 <p><strong>App runtime machine:</strong> {agentMachines?.runtime
                   ? `${agentMachines.runtime.state} (${agentMachines.runtime.id})`
@@ -1202,19 +1206,27 @@ export function FlyAppsManager() {
         {pending && (
           <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-2 text-sm">
             <h3 className="font-semibold">
-              {pendingReady
+              {pendingStatus === "cancelling" ? "Cancelling setup…" : pendingStatus === "cancelled" ? "Setup cancelled" : pendingReady
                 ? "App ready"
                 : pendingStatus === "failed" && !pendingApp
                   ? "Build failed"
                   : "Building app"}
             </h3>
             <p>
-              {pendingReady
+              {pendingStatus === "cancelling" ? "Stopping setup and cleaning up. Wait for confirmation before starting another run." : pendingStatus === "cancelled" ? "Further deployment requests from this run are blocked. Any previous deployment is kept." : pendingReady
                 ? "Open the URL and enter the password below."
                 : pendingStatus === "failed" && !pendingApp
                   ? "The builder stopped before the app became available. Check its Fly machine logs, then inspect and deploy again."
                   : "This may take a few minutes. The URL will work after the build and health check complete."}
             </p>
+            {pendingDetail?.error && <p className="text-destructive">{pendingDetail.error}</p>}
+            {pendingDetail?.cleanup && <p><strong>Cleanup ({pendingDetail.cleanup.status.replaceAll("_", " ")}):</strong> {pendingDetail.cleanup.detail}</p>}
+            {pending.workerId && !pendingReady && !["failed", "cancelled", "cancelling"].includes(pendingStatus ?? "") && <Button type="button" variant="outline" disabled={busy !== null} onClick={() => {
+              setBusy("cancel-setup");
+              void fetch("/api/fly-hub/apps/cancel", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({appName: pending.appName, workerId: pending.workerId}) })
+                .then((response) => json<{status: string; message: string}>(response)).then((data) => { setPendingStatus(data.status === "cancelling" ? "cancelling" : data.status === "cancelled" ? "cancelled" : "completed"); setNotice(data.message); })
+                .catch((cause) => setError(cause instanceof Error ? cause.message : "Could not cancel setup.")).finally(() => setBusy(null));
+            }}>Cancel setup</Button>}
             <a
               href={pending.url}
               target="_blank"

@@ -12,6 +12,7 @@ import { setHubSession } from "@kody-ade/fly/hub/session";
 import { issueFlyHubEveTask } from "@dashboard/lib/fly-hub-eve-task";
 import { flyHubAppName } from "@kody-ade/fly/hub/app-source";
 import { encrypt } from "@kody-ade/base/vault/crypto";
+vi.mock("@kody-ade/fly/hub/app-cancellation", () => ({ isAppTaskCancelled: vi.fn(async () => false), requestAppCancellation: vi.fn() }));
 const mocks = vi.hoisted(() => ({
   eve: vi.fn(),
   machines: vi.fn(),

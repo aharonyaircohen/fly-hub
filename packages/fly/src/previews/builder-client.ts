@@ -23,6 +23,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { cancellationMatches } from "../../builder/src/app-cancellation-record";
 
 import { logger } from "@kody-ade/base/logger";
 import { derivePreviewKey } from "../preview-token";
@@ -93,6 +94,7 @@ export interface SpawnBuilderResult {
 }
 
 export interface SpawnAppBuilderInput {
+  taskId?: string;
   repo: string;
   ref: string;
   appName: string;
@@ -145,7 +147,8 @@ export interface SpawnAppBuilderInput {
 }
 
 export interface PreviewBuilderStatus {
-  state: "building" | "completed" | "failed";
+  state: "building" | "completed" | "failed" | "cancelling" | "cancelled";
+  taskId?: string;
   error?: string;
   machineId?: string;
   machineState?: string;
@@ -269,6 +272,8 @@ function shouldDestroyBuilder(
     return false;
   if (machine.config?.metadata?.flyhub_cleanup_status === "needs_attention")
     return false;
+  // Active app builders own rollback. Never kill them to make room for a new run.
+  if (machine.config?.metadata?.flyhub_build_kind === "app" && ["started", "starting"].includes(machine.state ?? "") && !["completed", "failed", "cancelled"].includes(machine.config?.metadata?.flyhub_build_status ?? "")) return false;
   const samePreview = builderTargetApp(machine) === targetAppName;
   return samePreview
     ? !isReusableBuilder(machine, now, targetRef)
@@ -294,7 +299,7 @@ function isReusableBuilder(
   targetRef?: string,
 ): boolean {
   if (
-    ["completed", "failed"].includes(
+    ["completed", "failed", "cancelled"].includes(
       machine.config?.metadata?.flyhub_build_status ?? "",
     )
   )
@@ -337,7 +342,8 @@ export async function getPreviewBuilderStatus(
     });
     if (!res.ok) return null;
 
-    const machines = ((await res.json()) as BuilderMachineInfo[])
+    const allMachines = (await res.json()) as BuilderMachineInfo[];
+    const machines = allMachines
       .filter((m) => builderTargetApp(m) === appName)
       .sort(newestFirst);
     const latest = machines[0];
@@ -347,10 +353,12 @@ export async function getPreviewBuilderStatus(
       ? "building"
       : "failed";
     const savedStatus = latest.config?.metadata?.flyhub_build_status;
-    if (savedStatus === "completed" || savedStatus === "failed")
+    if (savedStatus === "completed" || savedStatus === "failed" || savedStatus === "cancelled")
       state = savedStatus;
+    const taskId = latest.config?.metadata?.flyhub_build_task || latest.config?.env?.APP_TASK_ID;
+    if (state === "building" && allMachines.some((machine) => cancellationMatches(machine.config?.metadata ?? {}, { orgSlug: latest.config?.metadata?.flyhub_build_org || latest.config?.env?.FLY_ORG_SLUG || "personal", workerId: latest.id, taskId }))) state = "cancelling";
     let exitCode: number | undefined;
-    if (state !== "building" && latest.id && !savedStatus) {
+    if (state !== "building" && state !== "cancelling" && latest.id && !savedStatus) {
       const machine = await fetch(builderMachinesUrl(latest.id, hostApp), {
         headers: builderAuthHeaders(token),
         signal: AbortSignal.timeout(BUILDER_MAINTENANCE_TIMEOUT_MS),
@@ -372,7 +380,7 @@ export async function getPreviewBuilderStatus(
     }
     let error: string | undefined;
     let cleanup: PreviewBuilderStatus["cleanup"];
-    if (state === "failed" && latest.id) {
+    if ((state === "failed" || state === "cancelled") && latest.id) {
       const detail = await fetch(
         `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(hostApp)}/machines/${encodeURIComponent(latest.id)}/metadata`,
         {
@@ -402,7 +410,7 @@ export async function getPreviewBuilderStatus(
 
     // Also scrub legacy workers and workers killed before their finally block.
     if (
-      state !== "building" &&
+      state !== "building" && state !== "cancelling" &&
       latest.id &&
       ["stopped", "failed"].includes(latest.state ?? "") &&
       Object.keys(latest.config?.env ?? {}).length &&
@@ -423,6 +431,7 @@ export async function getPreviewBuilderStatus(
     }
     return {
       state,
+      taskId,
       cleanup,
       error,
       machineId: latest.id,
@@ -644,6 +653,7 @@ export async function spawnAppBuilder(
     config: {
       image: input.builderImage ?? BUILDER_IMAGE,
       metadata: {
+        flyhub_build_task: input.taskId ?? "",
         flyhub_build_kind: "app",
         flyhub_build_app: input.appName,
         flyhub_build_ref: input.ref,
@@ -652,6 +662,7 @@ export async function spawnAppBuilder(
         flyhub_build_name: input.flyHubName ?? input.appName,
       },
       env: {
+        APP_TASK_ID: input.taskId ?? "",
         KODY_BUILDER_KIND: "app",
         APP_ALWAYS_ON: input.alwaysOn ? "1" : "0",
         REPO: input.repo,

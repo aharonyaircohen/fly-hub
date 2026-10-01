@@ -97,7 +97,7 @@ describe("deployment worker isolation", () => {
 });
 
 describe("build worker credential cleanup", () => {
-  it.each(["completed", "failed"] as const)(
+  it.each(["completed", "failed", "cancelled"] as const)(
     "erases all credentials and retains %s diagnostics",
     async (status) => {
       const fetch = vi.fn(async (url, init) =>

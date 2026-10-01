@@ -111,3 +111,19 @@ describe("safe app replacement", () => {
     expect(f.events).not.toContain("resume original-machine");
   });
 });
+
+it("restores state and data when verification is cancelled", async () => {
+  const f = fixture();
+  f.actions.deploy = async (volumes, register) => {
+    register({app: "app", id: "candidate-machine", state: "started"});
+    f.data.set(volumes[0]!.volumeId, "new data");
+    throw new Error("APP_SETUP_CANCELLED");
+  };
+  await expect(f.run()).rejects.toThrow("APP_SETUP_CANCELLED");
+  expect(f.events).toContain("destroy candidate-machine");
+  expect(f.events).toContain("resume original-machine");
+  expect(f.data.get("original-volume")).toBe("original data");
+  expect(f.data.has("copied-volume")).toBe(false);
+  expect(f.secret()).toBe("original secret");
+  expect(f.actions.report).toHaveBeenCalledWith(expect.stringContaining("Setup cancelled"));
+});

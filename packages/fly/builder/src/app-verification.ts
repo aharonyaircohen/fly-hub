@@ -41,13 +41,14 @@ function launchTicket(access: PrivateAccess): string {
 async function fetchSameOrigin(
   target: URL,
   headers?: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<Response> {
   let current = target;
   for (let redirect = 0; redirect <= 5; redirect += 1) {
     const response = await fetch(current, {
       headers,
       redirect: "manual",
-      signal: AbortSignal.timeout(3_000),
+      signal: signal ? AbortSignal.any([AbortSignal.timeout(3_000), signal]) : AbortSignal.timeout(3_000),
     });
     if (![301, 302, 303, 307, 308].includes(response.status)) return response;
     const location = response.headers.get("location");
@@ -66,18 +67,20 @@ export async function waitForAppVerification(input: {
   privateAccess?: PrivateAccess;
   attempts?: number;
   retryDelayMs?: number;
+  signal?: AbortSignal;
 }): Promise<void> {
   const target = verificationUrl(input.origin, input.verification.path);
   const attempts = input.attempts ?? 30;
   const retryDelayMs = input.retryDelayMs ?? 2_000;
   let last = "unreachable";
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    input.signal?.throwIfAborted();
     try {
       let cookie: string | undefined;
       if (input.privateAccess) {
         const launch = await fetch(
           `${input.origin}/?ka=${launchTicket(input.privateAccess)}`,
-          { redirect: "manual", signal: AbortSignal.timeout(3_000) },
+          { redirect: "manual", signal: input.signal ? AbortSignal.any([AbortSignal.timeout(3_000), input.signal]) : AbortSignal.timeout(3_000) },
         );
         cookie = launch.headers.get("set-cookie")?.split(";", 1)[0];
         if (launch.status !== 302 || !cookie) {
@@ -88,10 +91,12 @@ export async function waitForAppVerification(input: {
       const response = await fetchSameOrigin(
         target,
         cookie ? { cookie } : undefined,
+        input.signal,
       );
       if (response.status === input.verification.expectedStatus) return;
       last = `HTTP ${response.status}`;
     } catch (error) {
+      input.signal?.throwIfAborted();
       if (
         error instanceof Error &&
         (error.message === "APP_VERIFICATION_INVALID_PATH" ||

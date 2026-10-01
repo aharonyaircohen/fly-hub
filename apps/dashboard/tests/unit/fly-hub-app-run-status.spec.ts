@@ -132,3 +132,10 @@ it("includes runtime health in the deployed app state", () => {
   expect(deployedAppState("started", [])).toBe("unavailable");
   expect(deployedAppState("started", ["started"])).toBe("started");
 });
+
+it("keeps cancellation in progress until Fly cleanup finishes", () => {
+  expect(appRunStage({eveStatus:"completed", builderState:"cancelling", ready:false}).stage).toBe("cancelling");
+  expect(appRunStage({eveStatus:"cancelled", builderState:"building", ready:false}).stage).toBe("cancelling");
+  expect(appRunStage({eveStatus:"completed", builderState:"cancelled", ready:true}).stage).toBe("cancelled");
+  expect(appRunStage({eveStatus:"cancelled", builderState:"failed", ready:false}).stage).toBe("build_failed");
+});

@@ -98,5 +98,5 @@ test("old Settings URL opens Machines", async ({ page }) => {
   await connected(page);
   await page.goto("/fly/config");
   await expect(page).toHaveURL(/\/fly\/machines$/);
-  await expect(page.getByRole("navigation", { name: "Fly pages" }).getByRole("link", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Fly pages" }).getByRole("link", { name: "Settings" })).toHaveCount(0);
 });

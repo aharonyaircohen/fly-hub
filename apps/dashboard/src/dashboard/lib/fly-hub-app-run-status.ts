@@ -12,7 +12,8 @@ export type AppRunStage =
   | "eve_failed"
   | "eve_unavailable"
   | "finished_without_app"
-  | "cancelled";
+  | "cancelled"
+  | "cancelling";
 
 export type FlyMachineEvent = {
   type: string;
@@ -40,12 +41,14 @@ export function machineEventReason(event?: FlyMachineEvent): string | null {
 
 export function appRunStage(input: {
   eveStatus: string;
-  builderState?: "building" | "completed" | "failed" | null;
+  builderState?: "building" | "completed" | "failed" | "cancelling" | "cancelled" | null;
   gatewayState?: string | null;
   runtimeState?: string | null;
   eveError?: string | null;
   ready: boolean;
 }): { stage: AppRunStage; explanation: string } {
+  if (input.builderState === "cancelling" || (input.builderState === "building" && input.eveStatus === "cancelled")) return { stage: "cancelling", explanation: "Stopping setup and cleaning up. A previous deployment will be restored if it was paused." };
+  if (input.builderState === "cancelled") return { stage: "cancelled", explanation: "Setup cancelled. Check cleanup details below to confirm the previous app was kept and replacement resources were removed." };
   if (input.builderState === "failed")
     return input.eveStatus === "working"
       ? {
@@ -81,7 +84,7 @@ export function appRunStage(input: {
     return {
       stage: "cancelled",
       explanation:
-        "This Eve run was cancelled. Check the machine details for any deployment already in progress.",
+        "Setup cancelled. Further deployment requests from this run are blocked. A deployment that already finished is kept.",
     };
   if (input.builderState === "building")
     return {
