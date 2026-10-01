@@ -79,7 +79,7 @@ export async function GET(req: NextRequest) {
         : null;
     const pendingApp = apps.find((app) => app?.appName === pendingName);
     const pendingReady =
-      pendingApp?.state === "started"
+      pendingApp?.state === "started" && pendingStatus?.state === "completed"
         ? await fetch(`https://${pendingName}.fly.dev/_kody/health`, {
             cache: "no-store",
             signal: AbortSignal.timeout(4_000),
