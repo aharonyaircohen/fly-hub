@@ -8,6 +8,7 @@ export async function clearAppBuilderCredentials(input: {
   machine: string;
   token: string;
   status: "completed" | "failed";
+  metadata?: Record<string, string>;
 }) {
   const base = `https://api.machines.dev/v1/apps/${encodeURIComponent(input.app)}/machines/${encodeURIComponent(input.machine)}`;
   const headers = {
@@ -43,6 +44,7 @@ export async function clearAppBuilderCredentials(input: {
         init: { cmd: ["sh", "-c", "exit 0"] },
         metadata: {
           ...metadata,
+          ...input.metadata,
           flyhub_build_kind: "app",
           flyhub_build_app: env.APP_NAME || metadata.flyhub_build_app || "",
           flyhub_build_ref: env.REF || metadata.flyhub_build_ref || "",

@@ -125,6 +125,13 @@ describe("build worker credential cleanup", () => {
         machine: "worker",
         token: "secret-fly",
         status,
+        metadata: {
+          flyhub_cleanup_status: "completed",
+          flyhub_cleanup_detail:
+            "Cleanup completed. New app resources removed.",
+          flyhub_last_error:
+            "Latest failure detail retained despite an older Fly metadata response",
+        },
       });
       const update = fetch.mock.calls.find(
         ([, init]) => init?.method === "POST",
@@ -137,7 +144,11 @@ describe("build worker credential cleanup", () => {
           metadata: {
             flyhub_build_app: app,
             flyhub_build_status: status,
-            flyhub_last_error: "retained log",
+            flyhub_last_error:
+              "Latest failure detail retained despite an older Fly metadata response",
+            flyhub_cleanup_status: "completed",
+            flyhub_cleanup_detail:
+              "Cleanup completed. New app resources removed.",
           },
         },
       });

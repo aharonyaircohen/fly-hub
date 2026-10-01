@@ -42,31 +42,29 @@ let recentOutput = "";
 const previousSecretValues: string[] = [];
 const createdApps: string[] = [];
 const createdVolumes: Array<{ app: string; id: string }> = [];
+const workerMetadata: Record<string, string> = {};
 async function saveWorkerMetadata(values: Record<string, string>) {
+  Object.assign(workerMetadata, values);
   const app = process.env.FLY_APP_NAME,
     machine = process.env.FLY_MACHINE_ID,
     token = process.env.FLY_API_TOKEN;
   if (!app || !machine || !token) return;
-  await Promise.all(
-    Object.entries(values).map(async ([name, value]) => {
-      const response = await fetch(
-        `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/${name}`,
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${token}`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ value }),
-          signal: AbortSignal.timeout(10_000),
+  for (const [name, value] of Object.entries(values)) {
+    const response = await fetch(
+      `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/${name}`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
         },
-      );
-      if (!response.ok)
-        throw new Error(
-          `Could not record setup state: HTTP ${response.status}`,
-        );
-    }),
-  );
+        body: JSON.stringify({ value }),
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!response.ok)
+      throw new Error(`Could not record setup state: HTTP ${response.status}`);
+  }
 }
 function rememberOutput(value: string) {
   recentOutput = (recentOutput + value).slice(-12_000);
@@ -779,18 +777,7 @@ main()
         ])
           if (value && value.length >= 8)
             detail = detail.replaceAll(value, "[redacted]");
-        await fetch(
-          `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/flyhub_last_error`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ value: detail }),
-            signal: AbortSignal.timeout(5_000),
-          },
-        );
+        await saveWorkerMetadata({ flyhub_last_error: detail });
       }
     } catch (metadataError) {
       console.error(
@@ -820,6 +807,7 @@ main()
           machine,
           token,
           status: buildStatus,
+          metadata: workerMetadata,
         });
         return;
       } catch {
