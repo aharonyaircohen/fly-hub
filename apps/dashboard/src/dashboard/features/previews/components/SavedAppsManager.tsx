@@ -68,8 +68,10 @@ const phaseNames: Record<string, string> = {
 };
 export function SavedAppsManager({
   saveRequest,
+  onViewDeployedApps,
 }: {
   saveRequest: SaveAppRequest | null;
+  onViewDeployedApps: () => void;
 }) {
   const [user, setUser] = useState<string | null>(null);
   const [token, setToken] = useState("");
@@ -343,17 +345,26 @@ export function SavedAppsManager({
             </p>
           )}
           {job.status === "completed" && job.action === "create" && job.url && (
-            <p>
-              <a
-                href={job.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline"
+            <div className="space-y-2">
+              <p>
+                <a
+                  href={job.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline"
+                >
+                  Open created app
+                </a>
+                . Its password is available under Deployed apps → Show password.
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onViewDeployedApps}
               >
-                Open created app
-              </a>
-              . Its password is available under Deployed apps → Show password.
-            </p>
+                View deployed apps
+              </Button>
+            </div>
           )}
           <details>
             <summary className="cursor-pointer text-muted-foreground">
@@ -381,7 +392,7 @@ export function SavedAppsManager({
       ))}
       {user && saved.length === 0 && (
         <p className="text-sm text-muted-foreground">
-          No saved apps yet. Use Save app on a deployed app above.
+          No saved apps yet. Open the Deployed apps tab and click Save app.
         </p>
       )}
       {saved.map((app) => (

@@ -92,6 +92,12 @@ type EveFailure = { code?: number; message?: string; data?: {
 } };
 type EveTrace = { events: Array<{ index: number; at: string; type: string; summary: string }>; nextOffset: number; hasMore: boolean };
 const runHistoryKey = "flyhub:eve-app-runs";
+const appTabs = [
+  { id: "create", label: "Create app" },
+  { id: "deployed", label: "Deployed apps" },
+  { id: "saved", label: "Saved apps" },
+] as const;
+type AppTab = (typeof appTabs)[number]["id"];
 type EveInputRequest = {
   requestId: string;
   kind?: string;
@@ -132,6 +138,7 @@ async function json<T>(response: Response): Promise<T> {
 }
 
 export function FlyAppsManager() {
+  const [activeTab, setActiveTab] = useState<AppTab>("create");
   const [url, setUrl] = useState("");
   const [setupPrompt, setSetupPrompt] = useState("");
   const [agentHandle, setAgentHandle] = useState<string | null>(null);
@@ -643,10 +650,59 @@ export function FlyAppsManager() {
       <header>
         <h1 className="text-2xl font-semibold">Apps</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Deploy a public GitHub repository to this Fly organization. Each app
-          gets one shared password.
+          Create, manage, and save your password-protected apps.
         </p>
       </header>
+      <div
+        role="tablist"
+        aria-label="Apps"
+        className="flex border-b"
+        onKeyDown={(event) => {
+          const index = appTabs.findIndex((tab) => tab.id === activeTab);
+          const next =
+            event.key === "ArrowRight"
+              ? (index + 1) % appTabs.length
+              : event.key === "ArrowLeft"
+                ? (index + appTabs.length - 1) % appTabs.length
+                : event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? appTabs.length - 1
+                    : null;
+          if (next === null) return;
+          event.preventDefault();
+          setActiveTab(appTabs[next].id);
+          document.getElementById(`apps-tab-${appTabs[next].id}`)?.focus();
+        }}
+      >
+        {appTabs.map((tab) => (
+          <button
+            key={tab.id}
+            id={`apps-tab-${tab.id}`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            aria-controls={`apps-panel-${tab.id}`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            onClick={() => setActiveTab(tab.id)}
+            className={`flex-1 border-b-2 px-3 py-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${activeTab === tab.id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+      <div
+        id="apps-panel-create"
+        role="tabpanel"
+        aria-labelledby="apps-tab-create"
+        hidden={activeTab !== "create"}
+        className="space-y-6"
+      >
       {runs.length > 0 && (
         <section className="rounded-xl border bg-card p-6 space-y-3">
           <h2 className="text-lg font-semibold">Recent setup runs</h2>
@@ -1121,13 +1177,15 @@ export function FlyAppsManager() {
             )}
           </div>
         )}
-        {error && (
-          <p role="alert" className="text-sm text-destructive">
-            {error}
-          </p>
-        )}
       </section>
-      <section className="space-y-3">
+      </div>
+      <section
+        id="apps-panel-deployed"
+        role="tabpanel"
+        aria-labelledby="apps-tab-deployed"
+        hidden={activeTab !== "deployed"}
+        className="space-y-3"
+      >
         <h2 className="text-lg font-semibold">Deployed apps</h2>
         {apps.length === 0 && (
           <p className="text-sm text-muted-foreground">
@@ -1166,9 +1224,10 @@ export function FlyAppsManager() {
                 type="button"
                 variant="outline"
                 disabled={busy !== null}
-                onClick={() =>
-                  setSaveRequest({ app: app.appName, nonce: Date.now() })
-                }
+                onClick={() => {
+                  setActiveTab("saved");
+                  setSaveRequest({ app: app.appName, nonce: Date.now() });
+                }}
               >
                 Save app
               </Button>
@@ -1213,7 +1272,17 @@ export function FlyAppsManager() {
           </div>
         ))}
       </section>
-      <SavedAppsManager saveRequest={saveRequest} />
+      <div
+        id="apps-panel-saved"
+        role="tabpanel"
+        aria-labelledby="apps-tab-saved"
+        hidden={activeTab !== "saved"}
+      >
+        <SavedAppsManager
+          saveRequest={saveRequest}
+          onViewDeployedApps={() => setActiveTab("deployed")}
+        />
+      </div>
     </div>
   );
 }
