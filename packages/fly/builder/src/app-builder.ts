@@ -391,7 +391,6 @@ async function main() {
     "--config",
     deployConfigPath,
     "--remote-only",
-    "--depot=false",
     "--yes",
   ];
   if (plan.dockerfilePath) args.push("--dockerfile", plan.dockerfilePath);
@@ -420,7 +419,6 @@ async function main() {
         "--config",
         deployConfigPath,
         "--remote-only",
-        "--depot=false",
         "--yes",
         "--dockerfile",
         "Dockerfile.app-gateway",
