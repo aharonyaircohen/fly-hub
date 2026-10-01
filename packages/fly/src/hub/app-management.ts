@@ -3,6 +3,7 @@ import {
   type FlyPreviewConfig,
 } from "../plugin/previews/machines-client";
 import { runtimeAppName } from "../../builder/src/app-builder-names";
+import { clearAppBuilderCredentials } from "../../builder/src/app-builder-cleanup";
 
 import { assertFlyHubAppOwned, AppOwnershipError } from "./app-ownership";
 
@@ -94,24 +95,19 @@ export async function deleteFlyHubApp(app: string, cfg: FlyPreviewConfig) {
         throw new Error("Fly has not confirmed removal");
     }
     if (failedSetup) {
-      const base = `https://api.machines.dev/v1/apps/${encodeURIComponent(process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder")}/machines/${encodeURIComponent(failedSetup.id)}/metadata`;
-      await Promise.all(
-        Object.entries({
+      await clearAppBuilderCredentials({
+        app:
+          process.env.FLY_HUB_BUILDER_HOST_APP?.trim() ||
+          "kody-preview-builder",
+        machine: failedSetup.id,
+        token: cfg.token,
+        status: "failed",
+        metadata: {
           flyhub_cleanup_status: "completed",
           flyhub_cleanup_detail:
             "Remaining app resources removed. Saved backups were kept.",
-        }).map(([name, value]) =>
-          fetch(`${base}/${name}`, {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${cfg.token}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({ value }),
-            signal: AbortSignal.timeout(10_000),
-          }).catch(() => undefined),
-        ),
-      );
+        },
+      }).catch(() => undefined);
     }
     return { deletedApps, backupsKept: true };
   } catch (error) {
