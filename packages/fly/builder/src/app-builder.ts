@@ -18,6 +18,7 @@ import {
 } from "./fly-api.ts";
 import { appDeployConfig } from "./app-deploy-config.ts";
 import { runtimeAppName } from "./app-builder-names.ts";
+import { clearAppBuilderCredentials } from "./app-builder-cleanup.ts";
 import {
   waitForAppVerification,
   type AppVerification,
@@ -189,8 +190,7 @@ async function main() {
     exposure === "private" ? runtimeAppName(appName) : appName;
   const tokenHashes = process.env.KODY_APP_TOKEN_HASHES ?? "";
   const flyHubPasswordHash = process.env.FLY_HUB_PASSWORD_HASH ?? "";
-  const flyHubPasswordEncrypted =
-    process.env.FLY_HUB_PASSWORD_ENCRYPTED ?? "";
+  const flyHubPasswordEncrypted = process.env.FLY_HUB_PASSWORD_ENCRYPTED ?? "";
   const flyHubName = process.env.FLY_HUB_NAME ?? "";
   const flyHubAppPasswordEnv = process.env.FLY_HUB_APP_PASSWORD_ENV ?? "";
   const flyHubAppPasswordEncrypted =
@@ -429,7 +429,10 @@ async function main() {
                     ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
                     : {}),
                   ...(flyHubAppPasswordEncrypted
-                    ? { FLY_HUB_APP_PASSWORD_ENCRYPTED: flyHubAppPasswordEncrypted }
+                    ? {
+                        FLY_HUB_APP_PASSWORD_ENCRYPTED:
+                          flyHubAppPasswordEncrypted,
+                      }
                     : {}),
                 }
               : {}),
@@ -548,21 +551,36 @@ async function main() {
                         oldGateway?.config?.env?.FLY_HUB_PASSWORD_HASH ??
                         flyHubPasswordHash,
                       ...(oldGateway?.config?.env?.FLY_HUB_PASSWORD_ENCRYPTED
-                        ? { FLY_HUB_PASSWORD_ENCRYPTED: oldGateway.config.env.FLY_HUB_PASSWORD_ENCRYPTED }
+                        ? {
+                            FLY_HUB_PASSWORD_ENCRYPTED:
+                              oldGateway.config.env.FLY_HUB_PASSWORD_ENCRYPTED,
+                          }
                         : flyHubPasswordEncrypted
-                          ? { FLY_HUB_PASSWORD_ENCRYPTED: flyHubPasswordEncrypted }
+                          ? {
+                              FLY_HUB_PASSWORD_ENCRYPTED:
+                                flyHubPasswordEncrypted,
+                            }
                           : {}),
                       FLY_HUB_NAME: flyHubName,
-                      FLY_HUB_ALWAYS_ON: oldGateway?.config?.env?.FLY_HUB_ALWAYS_ON ?? "0",
+                      FLY_HUB_ALWAYS_ON:
+                        oldGateway?.config?.env?.FLY_HUB_ALWAYS_ON ?? "0",
                       FLY_HUB_SOURCE_REPO: repo,
                       FLY_HUB_COMMIT_SHA: ref,
                       ...(flyHubAppPasswordEnv
                         ? { FLY_HUB_APP_PASSWORD_ENV: flyHubAppPasswordEnv }
                         : {}),
-                      ...(oldGateway?.config?.env?.FLY_HUB_APP_PASSWORD_ENCRYPTED
-                        ? { FLY_HUB_APP_PASSWORD_ENCRYPTED: oldGateway.config.env.FLY_HUB_APP_PASSWORD_ENCRYPTED }
+                      ...(oldGateway?.config?.env
+                        ?.FLY_HUB_APP_PASSWORD_ENCRYPTED
+                        ? {
+                            FLY_HUB_APP_PASSWORD_ENCRYPTED:
+                              oldGateway.config.env
+                                .FLY_HUB_APP_PASSWORD_ENCRYPTED,
+                          }
                         : flyHubAppPasswordEncrypted
-                          ? { FLY_HUB_APP_PASSWORD_ENCRYPTED: flyHubAppPasswordEncrypted }
+                          ? {
+                              FLY_HUB_APP_PASSWORD_ENCRYPTED:
+                                flyHubAppPasswordEncrypted,
+                            }
                           : {}),
                     }
                   : {}),
@@ -606,55 +624,83 @@ async function main() {
     imageRef: image,
   });
 }
-main().catch(async (error) => {
-  console.error("[app-builder] failed", error);
-  try {
+let buildStatus: "completed" | "failed" = "completed";
+main()
+  .catch(async (error) => {
+    buildStatus = "failed";
+    console.error("[app-builder] failed", error);
+    try {
+      const app = process.env.FLY_APP_NAME;
+      const machine = process.env.FLY_MACHINE_ID;
+      const token = process.env.FLY_API_TOKEN;
+      if (app && machine && token) {
+        let detail =
+          `${recentOutput.slice(-7_500)}\n${error instanceof Error ? error.message : String(error)}`.slice(
+            -8_000,
+          );
+        let secrets: Record<string, string> = {};
+        try {
+          secrets = JSON.parse(
+            process.env.APP_RUNTIME_SECRETS_JSON ?? "{}",
+          ) as Record<string, string>;
+        } catch {
+          /* no secret list */
+        }
+        for (const value of [
+          token,
+          process.env.GITHUB_TOKEN,
+          ...Object.values(secrets),
+        ])
+          if (value && value.length >= 8)
+            detail = detail.replaceAll(value, "[redacted]");
+        await fetch(
+          `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/flyhub_last_error`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ value: detail }),
+            signal: AbortSignal.timeout(5_000),
+          },
+        );
+      }
+    } catch (metadataError) {
+      console.error(
+        "[app-builder] could not save failure detail",
+        metadataError,
+      );
+    }
+    await notify("failed", {
+      errorCode:
+        error instanceof Error &&
+        (error.message.startsWith("APP_HEALTH_CHECK_FAILED") ||
+          error.message.startsWith("APP_VERIFICATION_"))
+          ? "verification_failed"
+          : "deployment_failed",
+    });
+    process.exitCode = 4;
+  })
+  .finally(async () => {
     const app = process.env.FLY_APP_NAME;
     const machine = process.env.FLY_MACHINE_ID;
     const token = process.env.FLY_API_TOKEN;
-    if (app && machine && token) {
-      let detail =
-        `${recentOutput.slice(-7_500)}\n${error instanceof Error ? error.message : String(error)}`.slice(
-          -8_000,
-        );
-      let secrets: Record<string, string> = {};
+    if (!app || !machine || !token) return;
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        secrets = JSON.parse(
-          process.env.APP_RUNTIME_SECRETS_JSON ?? "{}",
-        ) as Record<string, string>;
+        await clearAppBuilderCredentials({
+          app,
+          machine,
+          token,
+          status: buildStatus,
+        });
+        return;
       } catch {
-        /* no secret list */
+        console.error("[app-builder] credential cleanup failed; retrying");
       }
-      for (const value of [
-        token,
-        process.env.GITHUB_TOKEN,
-        ...Object.values(secrets),
-      ])
-        if (value && value.length >= 8)
-          detail = detail.replaceAll(value, "[redacted]");
-      await fetch(
-        `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/flyhub_last_error`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ value: detail }),
-          signal: AbortSignal.timeout(5_000),
-        },
-      );
     }
-  } catch (metadataError) {
-    console.error("[app-builder] could not save failure detail", metadataError);
-  }
-  await notify("failed", {
-    errorCode:
-      error instanceof Error &&
-      (error.message.startsWith("APP_HEALTH_CHECK_FAILED") ||
-        error.message.startsWith("APP_VERIFICATION_"))
-        ? "verification_failed"
-        : "deployment_failed",
+    console.error(
+      "[app-builder] credentials could not be cleared; opening run status will retry cleanup",
+    );
   });
-  process.exit(4);
-});

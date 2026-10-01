@@ -18,6 +18,8 @@ import {
   deleteSavedAppVersion,
 } from "../../builder/src/app-image-registry";
 
+import { assertFlyHubAppOwned } from "./app-ownership";
+
 export { listSavedApps };
 export async function deleteSavedApp(
   cfg: FlyPreviewConfig,
@@ -177,6 +179,7 @@ export async function startSavedAppJob(
   const builderImage = process.env.FLY_HUB_BUILDER_IMAGE?.trim();
   if (!builderImage)
     throw new Error("The FlyHub builder image is not configured.");
+  if (input.action === "save") await assertFlyHubAppOwned(input.app, cfg);
   await assertPrivatePackage(registry.user, registry.token, true);
   let id: string,
     name: string,

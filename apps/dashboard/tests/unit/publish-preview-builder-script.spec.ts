@@ -54,3 +54,22 @@ describe("publish-preview-builder host-machine cleanup", () => {
     expect(spec.args).not.toContain("builder/fly.toml");
   });
 });
+
+it("preserves save/restore workers and builds whose credentials were cleared", () => {
+  expect(
+    builderHostMachineIds([
+      { id: "save", config: { env: { APP_IMAGE_JOB: "save" } } },
+      {
+        id: "restore",
+        config: { env: {}, metadata: { flyhub_image_action: "create" } },
+      },
+      {
+        id: "build",
+        config: {
+          env: {},
+          metadata: { flyhub_build_app: "app", flyhub_build_kind: "app" },
+        },
+      },
+    ]),
+  ).toEqual([]);
+});

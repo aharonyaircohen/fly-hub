@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 
 import { logger } from "@kody-ade/base/logger";
 import { derivePreviewKey } from "../preview-token";
+import { clearAppBuilderCredentials } from "../../builder/src/app-builder-cleanup";
 
 const FLY_MACHINES_BASE = "https://api.machines.dev/v1";
 const BUILDER_IMAGE =
@@ -47,6 +48,7 @@ interface BuilderMachineInfo {
   created_at?: string;
   config?: {
     env?: Record<string, string>;
+    metadata?: Record<string, string>;
   };
 }
 
@@ -184,17 +186,15 @@ function isStaleBuilder(machine: BuilderMachineInfo, now: number): boolean {
 }
 
 function builderTargetApp(machine: BuilderMachineInfo): string | undefined {
-  const value = machine.config?.env?.APP_NAME;
+  const value =
+    machine.config?.env?.APP_NAME || machine.config?.metadata?.flyhub_build_app;
   return value && value.trim() ? value : undefined;
 }
 
 function builderTargetRef(machine: BuilderMachineInfo): string | undefined {
-  const value = machine.config?.env?.REF;
+  const value =
+    machine.config?.env?.REF || machine.config?.metadata?.flyhub_build_ref;
   return value && value.trim() ? value : undefined;
-}
-
-function isHostAppMachine(machine: BuilderMachineInfo): boolean {
-  return Boolean(machine.id) && !builderTargetApp(machine);
 }
 
 function builderAgeMs(machine: BuilderMachineInfo, now: number): number | null {
@@ -210,7 +210,14 @@ function shouldDestroyBuilder(
   now: number,
 ): boolean {
   if (!machine.id || !isDestroyableBuilderState(machine.state)) return false;
-  if (isHostAppMachine(machine)) return true;
+  // This host also runs save/restore workers. Missing APP_NAME is not evidence
+  // that a machine is safe to delete; only prune identified deployment builders.
+  if (
+    !builderTargetApp(machine) ||
+    machine.config?.env?.APP_IMAGE_JOB ||
+    machine.config?.metadata?.flyhub_image_action
+  )
+    return false;
   const samePreview = builderTargetApp(machine) === targetAppName;
   return samePreview
     ? !isReusableBuilder(machine, now, targetRef)
@@ -235,6 +242,12 @@ function isReusableBuilder(
   now: number,
   targetRef?: string,
 ): boolean {
+  if (
+    ["completed", "failed"].includes(
+      machine.config?.metadata?.flyhub_build_status ?? "",
+    )
+  )
+    return false;
   if (targetRef && builderTargetRef(machine) !== targetRef) return false;
   return (
     Boolean(machine.id) &&
@@ -274,21 +287,36 @@ export async function getPreviewBuilderStatus(
     if (!res.ok) return null;
 
     const machines = ((await res.json()) as BuilderMachineInfo[])
-      .filter((m) => m.config?.env?.APP_NAME === appName)
+      .filter((m) => builderTargetApp(m) === appName)
       .sort(newestFirst);
     const latest = machines[0];
     if (!latest) return null;
     const now = Date.now();
-    let state: PreviewBuilderStatus["state"] = isReusableBuilder(latest, now) ? "building" : "failed";
+    let state: PreviewBuilderStatus["state"] = isReusableBuilder(latest, now)
+      ? "building"
+      : "failed";
+    const savedStatus = latest.config?.metadata?.flyhub_build_status;
+    if (savedStatus === "completed" || savedStatus === "failed")
+      state = savedStatus;
     let exitCode: number | undefined;
-    if (state !== "building" && latest.id) {
+    if (state !== "building" && latest.id && !savedStatus) {
       const machine = await fetch(builderMachinesUrl(latest.id, hostApp), {
         headers: builderAuthHeaders(token),
         signal: AbortSignal.timeout(BUILDER_MAINTENANCE_TIMEOUT_MS),
-      }).then(async (response) => response.ok ? await response.json() as {
-        events?: Array<{ type?: string; request?: { exit_event?: { exit_code?: number } } }>;
-      } : null, () => null);
-      exitCode = machine?.events?.find((event) => event.type === "exit")?.request?.exit_event?.exit_code;
+      }).then(
+        async (response) =>
+          response.ok
+            ? ((await response.json()) as {
+                events?: Array<{
+                  type?: string;
+                  request?: { exit_event?: { exit_code?: number } };
+                }>;
+              })
+            : null,
+        () => null,
+      );
+      exitCode = machine?.events?.find((event) => event.type === "exit")
+        ?.request?.exit_event?.exit_code;
       if (exitCode === 0) state = "completed";
     }
     let error: string | undefined;
@@ -312,6 +340,27 @@ export async function getPreviewBuilderStatus(
         error = `Fly builder process exited with code ${exitCode}.`;
     }
 
+    // Also scrub legacy workers and workers killed before their finally block.
+    if (
+      state !== "building" &&
+      latest.id &&
+      ["stopped", "failed"].includes(latest.state ?? "") &&
+      Object.keys(latest.config?.env ?? {}).length &&
+      (latest.config?.env?.KODY_BUILDER_KIND === "app" ||
+        latest.config?.env?.APP_BUILD_PLAN_JSON)
+    ) {
+      await clearAppBuilderCredentials({
+        app: hostApp,
+        machine: latest.id,
+        token,
+        status: state,
+      }).catch((err) =>
+        logger.warn(
+          { err, machineId: latest.id },
+          "app builder credential cleanup failed",
+        ),
+      );
+    }
     return {
       state,
       error,
@@ -533,6 +582,11 @@ export async function spawnAppBuilder(
   const body = {
     config: {
       image: input.builderImage ?? BUILDER_IMAGE,
+      metadata: {
+        flyhub_build_kind: "app",
+        flyhub_build_app: input.appName,
+        flyhub_build_ref: input.ref,
+      },
       env: {
         KODY_BUILDER_KIND: "app",
         APP_ALWAYS_ON: input.alwaysOn ? "1" : "0",
@@ -556,7 +610,10 @@ export async function spawnAppBuilder(
                 ? { FLY_HUB_APP_PASSWORD_ENV: input.flyHubAppPasswordEnv }
                 : {}),
               ...(input.flyHubAppPasswordEncrypted
-                ? { FLY_HUB_APP_PASSWORD_ENCRYPTED: input.flyHubAppPasswordEncrypted }
+                ? {
+                    FLY_HUB_APP_PASSWORD_ENCRYPTED:
+                      input.flyHubAppPasswordEncrypted,
+                  }
                 : {}),
             }
           : {}),

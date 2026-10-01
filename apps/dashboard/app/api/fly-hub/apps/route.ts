@@ -24,6 +24,11 @@ import {
   spawnAppBuilder,
 } from "@kody-ade/fly/apps/builder-client";
 
+import {
+  deployedAppState,
+  runtimeAppName,
+} from "@dashboard/lib/fly-hub-app-run-status";
+
 export const runtime = "nodejs";
 const builderHost = () =>
   process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder";
@@ -41,12 +46,21 @@ export async function GET(req: NextRequest) {
         );
         if (!gateway) return null;
         const env = gateway.config?.env ?? {};
+        const runtimeMachines = await listMachines(
+          runtimeAppName(appName),
+          auth.cfg,
+        );
         return {
           appName,
           name: env.FLY_HUB_NAME || appName,
           repository: env.FLY_HUB_SOURCE_REPO || "",
           commitSha: env.FLY_HUB_COMMIT_SHA || "",
-          state: gateway.state,
+          state: deployedAppState(
+            gateway.state,
+            runtimeMachines.map((machine) => machine.state),
+          ),
+          gatewayState: gateway.state,
+          runtimeStates: runtimeMachines.map((machine) => machine.state),
           url: `https://${appName}.fly.dev`,
           passwordAvailable: Boolean(env.FLY_HUB_PASSWORD_ENCRYPTED),
           appCredentialName: env.FLY_HUB_APP_PASSWORD_ENV || null,
@@ -128,7 +142,7 @@ export async function POST(req: NextRequest) {
     let evePlan: EveAppPlan | null = null;
     let taskBuild: FlyHubTaskBuild | null = null;
     const task = fromTask ? readFlyHubEveTask(body.taskGrant as string) : null;
-    let alwaysOn = task?.alwaysOn ?? (body.alwaysOn === true);
+    let alwaysOn = task?.alwaysOn ?? body.alwaysOn === true;
     if (fromTask) {
       if (
         !task ||
@@ -423,7 +437,9 @@ export async function POST(req: NextRequest) {
       flyHubName: inspected.name,
       flyHubAppPasswordEnv:
         evePlan?.appPasswordEnv ?? taskBuild?.appPasswordEnv,
-      flyHubAppPasswordEncrypted: appPassword ? encrypt(appPassword) : undefined,
+      flyHubAppPasswordEncrypted: appPassword
+        ? encrypt(appPassword)
+        : undefined,
       builderHostApp: builderHost(),
       builderImage,
       runtimeSecrets,

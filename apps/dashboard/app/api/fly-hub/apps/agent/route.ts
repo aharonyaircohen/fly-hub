@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { decrypt, encrypt } from "@kody-ade/base/vault/crypto";
 import {
   inspectPublicGitHubApp,
@@ -20,7 +20,12 @@ import {
   type FlyMachineEvent,
 } from "@dashboard/lib/fly-hub-app-run-status";
 import { getPreviewBuilderStatus } from "@kody-ade/fly/apps/builder-client";
-import { getMachineDiagnostic, listMachines } from "@kody-ade/fly/apps/machines-client";
+import {
+  getMachineDiagnostic,
+  listMachines,
+} from "@kody-ade/fly/apps/machines-client";
+
+import { appCredentials } from "@dashboard/lib/fly-hub-app-credentials";
 
 export const runtime = "nodejs";
 const privateHeaders = { "Cache-Control": "no-store, private" };
@@ -89,7 +94,13 @@ export async function POST(req: NextRequest) {
       });
       return NextResponse.json({ ok: true }, { headers: privateHeaders });
     } catch (error) {
-      return NextResponse.json({ error: error instanceof Error ? error.message : "Could not cancel Eve." }, { status: 400, headers: privateHeaders });
+      return NextResponse.json(
+        {
+          error:
+            error instanceof Error ? error.message : "Could not cancel Eve.",
+        },
+        { status: 400, headers: privateHeaders },
+      );
     }
   }
   if (body?.action === "resume_deploy") {
@@ -103,32 +114,57 @@ export async function POST(req: NextRequest) {
         agentId: handle.agentId,
         invocationId: handle.invocationId,
       });
-      if (current.status !== "input_required" || !current.inputRequests || typeof current.inputRequests !== "object")
+      if (
+        current.status !== "input_required" ||
+        !current.inputRequests ||
+        typeof current.inputRequests !== "object"
+      )
         throw new Error("Eve is not waiting for a deployment tool.");
-      const requests = Object.values(current.inputRequests as Record<string, {
-        requestId?: string;
-        kind?: string;
-        toolName?: string;
-        prompt?: string;
-        options?: Array<{ id?: string }>;
-      }>);
-      if (!requests.length || requests.some((request) =>
-        request.kind !== "tool-approval" ||
-        !request.requestId ||
-        !(request.toolName?.endsWith("flyhub_task_deploy") ||
-          request.prompt?.includes("flyhub__flyhub_task_deploy")) ||
-        !request.options?.some((option) => option.id === "approve")
-      )) throw new Error("Eve needs a different answer. Review the pending request.");
+      const requests = Object.values(
+        current.inputRequests as Record<
+          string,
+          {
+            requestId?: string;
+            kind?: string;
+            toolName?: string;
+            prompt?: string;
+            options?: Array<{ id?: string }>;
+          }
+        >,
+      );
+      if (
+        !requests.length ||
+        requests.some(
+          (request) =>
+            request.kind !== "tool-approval" ||
+            !request.requestId ||
+            !(
+              request.toolName?.endsWith("flyhub_task_deploy") ||
+              request.prompt?.includes("flyhub__flyhub_task_deploy")
+            ) ||
+            !request.options?.some((option) => option.id === "approve"),
+        )
+      )
+        throw new Error(
+          "Eve needs a different answer. Review the pending request.",
+        );
       await callEveStudioTool("agent_update", {
         agentId: handle.agentId,
         invocationId: handle.invocationId,
-        responses: requests.map((request) => ({ requestId: request.requestId, optionId: "approve" })),
+        responses: requests.map((request) => ({
+          requestId: request.requestId,
+          optionId: "approve",
+        })),
       });
       return NextResponse.json({ ok: true }, { headers: privateHeaders });
     } catch (error) {
-      return NextResponse.json({
-        error: error instanceof Error ? error.message : "Could not continue Eve.",
-      }, { status: 400, headers: privateHeaders });
+      return NextResponse.json(
+        {
+          error:
+            error instanceof Error ? error.message : "Could not continue Eve.",
+        },
+        { status: 400, headers: privateHeaders },
+      );
     }
   }
   if (body?.action === "answer") {
@@ -314,26 +350,38 @@ export async function GET(req: NextRequest) {
     );
   }
   try {
-    const state: Record<string, unknown> = await callEveStudioTool("agent_get", {
-      agentId: handle.agentId,
-      invocationId: handle.invocationId,
-    }).catch((error: unknown) => {
+    const state: Record<string, unknown> = await callEveStudioTool(
+      "agent_get",
+      {
+        agentId: handle.agentId,
+        invocationId: handle.invocationId,
+      },
+    ).catch((error: unknown) => {
       if (!handle.taskGrant) throw error;
       return {
         status: "unavailable",
         error: {
-          message: error instanceof Error ? error.message : "Could not reach Eve Studio.",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Could not reach Eve Studio.",
         },
       };
     });
-    const traceOffset = Number(req.nextUrl.searchParams.get("traceOffset") ?? "0");
-    const trace = req.nextUrl.searchParams.get("trace") === "1"
-      ? await callEveStudioTool("agent_events", {
-          agentId: handle.agentId,
-          invocationId: handle.invocationId,
-          offset: Number.isSafeInteger(traceOffset) && traceOffset >= 0 ? traceOffset : 0,
-        }).catch(() => null)
-      : null;
+    const traceOffset = Number(
+      req.nextUrl.searchParams.get("traceOffset") ?? "0",
+    );
+    const trace =
+      req.nextUrl.searchParams.get("trace") === "1"
+        ? await callEveStudioTool("agent_events", {
+            agentId: handle.agentId,
+            invocationId: handle.invocationId,
+            offset:
+              Number.isSafeInteger(traceOffset) && traceOffset >= 0
+                ? traceOffset
+                : 0,
+          }).catch(() => null)
+        : null;
     if (handle.taskGrant) {
       const task = readFlyHubEveTask(handle.taskGrant, { allowExpired: true });
       if (
@@ -350,41 +398,60 @@ export async function GET(req: NextRequest) {
         getPreviewBuilderStatus(
           appName,
           auth.cfg.token,
-          process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder",
+          process.env.FLY_HUB_BUILDER_HOST_APP?.trim() ||
+            "kody-preview-builder",
         ),
       ]);
       // A retry uses the same Fly app. Ignore a builder left by an earlier run
       // until this run creates its own builder machine.
-      const pendingStatus = pendingCandidate?.createdAt && handle.startedAt &&
+      const pendingStatus =
+        pendingCandidate?.createdAt &&
+        handle.startedAt &&
         Date.parse(pendingCandidate.createdAt) < handle.startedAt
-        ? null
-        : pendingCandidate;
+          ? null
+          : pendingCandidate;
       const gateway = machines.find(
         (machine) => machine.config?.env?.FLY_HUB_PASSWORD_HASH,
       );
       const runtimeMachine = runtimeMachines[0];
-      const builderHost = process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder";
-      const [builderDiagnostic, gatewayDiagnostic, runtimeDiagnostic] = await Promise.all([
-        pendingStatus?.machineId
-          ? getMachineDiagnostic(builderHost, pendingStatus.machineId, auth.cfg).catch(() => null)
-          : null,
-        gateway
-          ? getMachineDiagnostic(appName, gateway.id, auth.cfg).catch(() => null)
-          : null,
-        runtimeMachine
-          ? getMachineDiagnostic(runtimeAppName(appName), runtimeMachine.id, auth.cfg).catch(() => null)
-          : null,
-      ]);
-      const eventReason = (state: string | null | undefined, events: FlyMachineEvent[] | undefined) => {
-        const event = state === "suspended"
-          ? events?.find((item) => item.type === "suspension")
-          : state === "stopped"
-            ? events?.find((item) => item.type === "exit")
-            : events?.[0];
+      const builderHost =
+        process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder";
+      const [builderDiagnostic, gatewayDiagnostic, runtimeDiagnostic] =
+        await Promise.all([
+          pendingStatus?.machineId
+            ? getMachineDiagnostic(
+                builderHost,
+                pendingStatus.machineId,
+                auth.cfg,
+              ).catch(() => null)
+            : null,
+          gateway
+            ? getMachineDiagnostic(appName, gateway.id, auth.cfg).catch(
+                () => null,
+              )
+            : null,
+          runtimeMachine
+            ? getMachineDiagnostic(
+                runtimeAppName(appName),
+                runtimeMachine.id,
+                auth.cfg,
+              ).catch(() => null)
+            : null,
+        ]);
+      const eventReason = (
+        state: string | null | undefined,
+        events: FlyMachineEvent[] | undefined,
+      ) => {
+        const event =
+          state === "suspended"
+            ? events?.find((item) => item.type === "suspension")
+            : state === "stopped"
+              ? events?.find((item) => item.type === "exit")
+              : events?.[0];
         return machineEventReason(event);
       };
-      const ready =
-        gateway?.state === "started"
+      const responding =
+        gateway?.state === "started" && runtimeMachine?.state === "started"
           ? await fetch(`https://${appName}.fly.dev/_kody/health`, {
               cache: "no-store",
               signal: AbortSignal.timeout(4_000),
@@ -393,18 +460,39 @@ export async function GET(req: NextRequest) {
               () => false,
             )
           : false;
-      const password = (label: string) =>
-        createHmac("sha256", Buffer.from(task.passwordSeed, "hex"))
-          .update(label)
-          .digest("base64url")
-          .slice(0, 32);
+      const gatewayEnv = gateway?.config?.env ?? {};
+      const credentials = appCredentials(gatewayEnv, task.passwordSeed);
+      const sameRun = handle.startedAt
+        ? Boolean(
+            gateway?.createdAt &&
+            Date.parse(gateway.createdAt) >= handle.startedAt,
+          )
+        : gatewayEnv.FLY_HUB_PASSWORD_HASH ===
+          createHash("sha256")
+            .update(
+              createHmac("sha256", Buffer.from(task.passwordSeed, "hex"))
+                .update("outer")
+                .digest("base64url")
+                .slice(0, 32),
+            )
+            .digest("hex");
+      const ready =
+        responding &&
+        sameRun &&
+        gatewayEnv.FLY_HUB_COMMIT_SHA === task.commitSha &&
+        pendingStatus?.state !== "building" &&
+        pendingStatus?.state !== "failed";
       const progress = appRunStage({
         eveStatus: typeof state.status === "string" ? state.status : "working",
-        eveError: typeof state.error === "string"
-          ? state.error
-          : state.error && typeof state.error === "object" && "message" in state.error && typeof state.error.message === "string"
-            ? state.error.message
-            : null,
+        eveError:
+          typeof state.error === "string"
+            ? state.error
+            : state.error &&
+                typeof state.error === "object" &&
+                "message" in state.error &&
+                typeof state.error.message === "string"
+              ? state.error.message
+              : null,
         builderState: pendingStatus?.state,
         gatewayState: gateway?.state,
         runtimeState: runtimeMachine?.state,
@@ -433,7 +521,10 @@ export async function GET(req: NextRequest) {
                   state: pendingStatus.machineState ?? null,
                   startedAt: pendingStatus.createdAt ?? null,
                   error: pendingStatus.error ?? null,
-                  reason: eventReason(pendingStatus.machineState, builderDiagnostic?.events),
+                  reason: eventReason(
+                    pendingStatus.machineState,
+                    builderDiagnostic?.events,
+                  ),
                   events: builderDiagnostic?.events.slice(0, 5) ?? [],
                 }
               : null,
@@ -451,7 +542,10 @@ export async function GET(req: NextRequest) {
                   id: runtimeMachine.id,
                   state: runtimeMachine.state,
                   region: runtimeMachine.region,
-                  reason: eventReason(runtimeMachine.state, runtimeDiagnostic?.events),
+                  reason: eventReason(
+                    runtimeMachine.state,
+                    runtimeDiagnostic?.events,
+                  ),
                   events: runtimeDiagnostic?.events.slice(0, 5) ?? [],
                 }
               : null,
@@ -463,13 +557,8 @@ export async function GET(req: NextRequest) {
                 ready,
                 buildStatus: pendingStatus?.state ?? null,
                 buildError: pendingStatus?.error ?? null,
-                password: password("outer"),
-                appCredential: gateway.config?.env?.FLY_HUB_APP_PASSWORD_ENV
-                  ? {
-                      name: gateway.config.env.FLY_HUB_APP_PASSWORD_ENV,
-                      password: password("inner"),
-                    }
-                  : null,
+                password: credentials.password,
+                appCredential: credentials.appCredential,
               }
             : {
                 appName,

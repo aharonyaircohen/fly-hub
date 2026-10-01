@@ -1,10 +1,10 @@
 import {
-  listAppsByPrefix,
   listMachines,
   type FlyPreviewConfig,
 } from "../plugin/previews/machines-client";
-import { appNamePattern } from "../../builder/src/app-image-format";
 import { runtimeAppName } from "../../builder/src/app-builder-names";
+
+import { assertFlyHubAppOwned, AppOwnershipError } from "./app-ownership";
 
 export class AppDeletionError extends Error {
   constructor(
@@ -17,11 +17,14 @@ export class AppDeletionError extends Error {
 }
 
 export async function deleteFlyHubApp(app: string, cfg: FlyPreviewConfig) {
-  if (!appNamePattern.test(app))
-    throw new AppDeletionError("App not found.", 404);
-  const owned = await listAppsByPrefix("flyhub-app-", cfg);
-  if (!owned.includes(app))
-    throw new AppDeletionError("App not found in this Fly organization.", 404);
+  let owned: string[];
+  try {
+    owned = await assertFlyHubAppOwned(app, cfg);
+  } catch (error) {
+    if (error instanceof AppOwnershipError)
+      throw new AppDeletionError(error.message, error.status);
+    throw error;
+  }
   const gateway = (await listMachines(app, cfg)).find(
     (m) => m.config?.env?.FLY_HUB_PASSWORD_HASH,
   );

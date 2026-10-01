@@ -19,12 +19,22 @@ const builderRoot = join(
 );
 
 export function builderMachineTargetApp(machine) {
-  const value = machine?.config?.env?.APP_NAME;
+  const value =
+    machine?.config?.env?.APP_NAME ||
+    machine?.config?.metadata?.flyhub_build_app;
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 export function isBuilderHostMachine(machine) {
-  return Boolean(machine?.id) && !builderMachineTargetApp(machine);
+  const env = machine?.config?.env ?? {};
+  const metadata = machine?.config?.metadata ?? {};
+  return (
+    Boolean(machine?.id) &&
+    !builderMachineTargetApp(machine) &&
+    !env.APP_IMAGE_JOB &&
+    !metadata.flyhub_image_action &&
+    !metadata.flyhub_build_kind
+  );
 }
 
 export function builderHostMachineIds(machines) {

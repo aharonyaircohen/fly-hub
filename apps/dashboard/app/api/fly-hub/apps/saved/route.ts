@@ -7,6 +7,8 @@ import {
   deleteSavedApp,
 } from "@kody-ade/fly/hub/saved-apps";
 import { readRegistrySession } from "@dashboard/lib/fly-hub-registry-session";
+import { AppOwnershipError } from "@kody-ade/fly/hub/app-ownership";
+
 export const runtime = "nodejs";
 export const maxDuration = 120;
 const headers = { "Cache-Control": "no-store, private" };
@@ -87,7 +89,10 @@ export async function POST(req: NextRequest) {
             ? error.message
             : "Could not start saved app operation.",
       },
-      { status: 400, headers },
+      {
+        status: error instanceof AppOwnershipError ? error.status : 400,
+        headers,
+      },
     );
   }
 }
@@ -127,7 +132,10 @@ export async function DELETE(req: NextRequest) {
             ? error.message
             : "Could not delete saved version.",
       },
-      { status: 400, headers },
+      {
+        status: error instanceof AppOwnershipError ? error.status : 400,
+        headers,
+      },
     );
   }
 }

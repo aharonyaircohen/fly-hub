@@ -969,7 +969,7 @@ export function FlyAppsManager() {
                 )}
               </div>
             )}
-            {agentMode === "deployment" && ["eve_failed", "build_failed", "finished_without_app", "cancelled"].includes(agentProgress?.stage ?? "") && (
+            {agentMode === "deployment" && ["eve_failed", "build_failed", "app_failed", "app_stopped", "finished_without_app", "cancelled"].includes(agentProgress?.stage ?? "") && (
               <Button type="button" variant="outline" disabled={busy !== null} onClick={() => void planWithEve(url, setupPrompt)}>
                 {busy === "agent" ? "Starting…" : "Retry this repository"}
               </Button>
