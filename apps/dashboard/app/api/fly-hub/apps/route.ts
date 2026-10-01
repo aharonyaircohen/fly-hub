@@ -21,6 +21,7 @@ import {
 } from "@kody-ade/fly/apps/machines-client";
 import {
   getPreviewBuilderStatus,
+  listFailedAppSetups,
   spawnAppBuilder,
 } from "@kody-ade/fly/apps/builder-client";
 
@@ -69,6 +70,42 @@ export async function GET(req: NextRequest) {
       }),
     );
     const pendingName = req.nextUrl.searchParams.get("pending");
+    let historyError: string | null = null;
+    const failures = await listFailedAppSetups(
+      auth.cfg.token,
+      auth.cfg.orgSlug,
+      builderHost(),
+    ).catch(() => {
+      historyError =
+        "Setup history is temporarily unavailable. Refresh to try again.";
+      return [];
+    });
+    const failedSetups = failures
+      .filter(
+        (failure) => !apps.some((app) => app?.appName === failure.appName),
+      )
+      .map((failure) => {
+        const remainingResources =
+          names.includes(failure.appName) ||
+          names.includes(runtimeAppName(failure.appName));
+        return {
+          ...failure,
+          remainingResources,
+          cleanup: remainingResources
+            ? {
+                status: "needs_attention",
+                detail:
+                  failure.cleanup.status === "needs_attention"
+                    ? failure.cleanup.detail
+                    : "Some app resources remain. Remove them below.",
+              }
+            : {
+                status: "completed",
+                detail:
+                  "No app resources remain. Existing apps and saved backups were kept.",
+              },
+        };
+      });
     const pendingStatus =
       pendingName && /^flyhub-app-[a-z0-9-]+-[a-f0-9]{12}$/.test(pendingName)
         ? await getPreviewBuilderStatus(
@@ -89,7 +126,13 @@ export async function GET(req: NextRequest) {
           )
         : false;
     return NextResponse.json(
-      { apps: apps.filter(Boolean), pendingStatus, pendingReady },
+      {
+        apps: apps.filter(Boolean),
+        failedSetups,
+        historyError,
+        pendingStatus,
+        pendingReady,
+      },
       { headers: { "Cache-Control": "no-store, private" } },
     );
   } catch {

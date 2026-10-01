@@ -9,6 +9,7 @@ import {
   createApp,
   createPreviewMachine,
   destroyMachine,
+  destroyApp,
   listMachines,
   destroyVolume,
   startMachine,
@@ -21,6 +22,7 @@ import { replaceAppDeployment } from "./app-deployment-transaction.ts";
 import { appDeployConfig } from "./app-deploy-config.ts";
 import { runtimeAppName } from "./app-builder-names.ts";
 import { clearAppBuilderCredentials } from "./app-builder-cleanup.ts";
+import { cleanupFirstDeployment } from "./app-first-deployment-cleanup.ts";
 import {
   waitForAppVerification,
   type AppVerification,
@@ -38,6 +40,34 @@ const exists = async (path: string) =>
   );
 let recentOutput = "";
 const previousSecretValues: string[] = [];
+const createdApps: string[] = [];
+const createdVolumes: Array<{ app: string; id: string }> = [];
+async function saveWorkerMetadata(values: Record<string, string>) {
+  const app = process.env.FLY_APP_NAME,
+    machine = process.env.FLY_MACHINE_ID,
+    token = process.env.FLY_API_TOKEN;
+  if (!app || !machine || !token) return;
+  await Promise.all(
+    Object.entries(values).map(async ([name, value]) => {
+      const response = await fetch(
+        `https://api.machines.dev/v1/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(machine)}/metadata/${name}`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ value }),
+          signal: AbortSignal.timeout(10_000),
+        },
+      );
+      if (!response.ok)
+        throw new Error(
+          `Could not record setup state: HTTP ${response.status}`,
+        );
+    }),
+  );
+}
 function rememberOutput(value: string) {
   recentOutput = (recentOutput + value).slice(-12_000);
 }
@@ -248,14 +278,24 @@ async function main() {
     deployConfigPath,
     appDeployConfig(appName, process.env.FLY_REGION ?? "fra"),
   );
-  if (!(await appExists(appName, flyToken)))
+  if (!(await appExists(appName, flyToken))) {
     await createApp(appName, process.env.FLY_ORG_SLUG ?? "personal", flyToken);
-  if (!(await appExists(runtimeName, flyToken)))
+    createdApps.push(appName);
+    await saveWorkerMetadata({
+      flyhub_created_apps: JSON.stringify(createdApps),
+    });
+  }
+  if (!(await appExists(runtimeName, flyToken))) {
     await createApp(
       runtimeName,
       process.env.FLY_ORG_SLUG ?? "personal",
       flyToken,
     );
+    createdApps.push(runtimeName);
+    await saveWorkerMetadata({
+      flyhub_created_apps: JSON.stringify(createdApps),
+    });
+  }
   if (exposure === "private") {
     await allocateSharedIps(appName, flyToken);
     await allocatePrivateIp(runtimeName, flyToken);
@@ -303,6 +343,12 @@ async function main() {
         ),
       ) as { id?: string } | Array<{ id?: string }>;
       volumeId = Array.isArray(created) ? created[0]?.id : created.id;
+      if (volumeId) {
+        createdVolumes.push({ app: runtimeName, id: volumeId });
+        await saveWorkerMetadata({
+          flyhub_created_volumes: JSON.stringify(createdVolumes),
+        });
+      }
     }
     if (!volumeId)
       throw new Error("Could not create the app's storage volume.");
@@ -673,6 +719,41 @@ main()
   .catch(async (error) => {
     buildStatus = "failed";
     console.error("[app-builder] failed", error);
+    try {
+      const token = process.env.FLY_API_TOKEN;
+      if (token) {
+        const cleanup = await cleanupFirstDeployment({
+          createdApps,
+          createdVolumes,
+          destroyApp: (app) => destroyApp(app, token, true),
+          destroyVolume: (app, id) => destroyVolume(app, id, token),
+          appExists: (app) => appExists(app, token),
+        });
+        if (
+          error instanceof Error &&
+          error.message.startsWith("DEPLOYMENT_RECOVERY_FAILED")
+        ) {
+          cleanup.status = "needs_attention";
+          cleanup.detail =
+            "Update recovery needs attention. Existing app resources were kept. Open job details for the failed recovery steps.";
+        }
+        rememberOutput(cleanup.detail + "\n");
+        console.log(`[app-builder] ${cleanup.detail}`);
+        await saveWorkerMetadata({
+          flyhub_cleanup_status: cleanup.status,
+          flyhub_cleanup_detail: cleanup.detail,
+        });
+      }
+    } catch (cleanupError) {
+      rememberOutput(
+        `Cleanup could not be confirmed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}\n`,
+      );
+      await saveWorkerMetadata({
+        flyhub_cleanup_status: "needs_attention",
+        flyhub_cleanup_detail:
+          "Cleanup could not be confirmed. Open job details and remove remaining resources.",
+      }).catch(() => undefined);
+    }
     try {
       const app = process.env.FLY_APP_NAME;
       const machine = process.env.FLY_MACHINE_ID;

@@ -19,28 +19,42 @@ export class AppDeletionError extends Error {
 export async function deleteFlyHubApp(app: string, cfg: FlyPreviewConfig) {
   let owned: string[];
   try {
-    owned = await assertFlyHubAppOwned(app, cfg);
+    owned = await assertFlyHubAppOwned(app, cfg, { allowRuntimeOnly: true });
   } catch (error) {
     if (error instanceof AppOwnershipError)
       throw new AppDeletionError(error.message, error.status);
     throw error;
   }
-  const gateway = (await listMachines(app, cfg)).find(
-    (m) => m.config?.env?.FLY_HUB_PASSWORD_HASH,
-  );
-  if (!gateway)
-    throw new AppDeletionError("This is not a FlyHub deployed app.", 404);
+  const gateway = (
+    owned.includes(app) ? await listMachines(app, cfg) : []
+  ).find((m) => m.config?.env?.FLY_HUB_PASSWORD_HASH);
   const runtime = runtimeAppName(app);
   const workers = await listMachines(
     process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder",
     cfg,
   );
+  const failedSetup = workers.find((machine) => {
+    const metadata = (machine.config?.metadata ?? {}) as Record<string, string>;
+    return (
+      metadata.flyhub_build_app === app &&
+      metadata.flyhub_build_org === cfg.orgSlug &&
+      metadata.flyhub_build_status === "failed"
+    );
+  });
+  if (!gateway && !failedSetup)
+    throw new AppDeletionError(
+      "This is not a FlyHub deployed app or a recorded failed setup.",
+      404,
+    );
   const active = workers.find((m) => {
     if (["stopped", "suspended", "destroyed", "failed"].includes(m.state))
       return false;
     const metadata = (m.config?.metadata ?? {}) as Record<string, string>;
     return (
-      m.config?.env?.APP_NAME === app ||
+      ((m.config?.env?.APP_NAME === app || metadata.flyhub_build_app === app) &&
+        !["completed", "failed", "cancelled"].includes(
+          metadata.flyhub_build_status ?? "",
+        )) ||
       (metadata.flyhub_image_org === cfg.orgSlug &&
         metadata.flyhub_image_status === "working" &&
         (metadata.flyhub_image_source === app ||
@@ -78,6 +92,26 @@ export async function deleteFlyHubApp(app: string, cfg: FlyPreviewConfig) {
       });
       if (check.status !== 404)
         throw new Error("Fly has not confirmed removal");
+    }
+    if (failedSetup) {
+      const base = `https://api.machines.dev/v1/apps/${encodeURIComponent(process.env.FLY_HUB_BUILDER_HOST_APP?.trim() || "kody-preview-builder")}/machines/${encodeURIComponent(failedSetup.id)}/metadata`;
+      await Promise.all(
+        Object.entries({
+          flyhub_cleanup_status: "completed",
+          flyhub_cleanup_detail:
+            "Remaining app resources removed. Saved backups were kept.",
+        }).map(([name, value]) =>
+          fetch(`${base}/${name}`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${cfg.token}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ value }),
+            signal: AbortSignal.timeout(10_000),
+          }).catch(() => undefined),
+        ),
+      );
     }
     return { deletedApps, backupsKept: true };
   } catch (error) {

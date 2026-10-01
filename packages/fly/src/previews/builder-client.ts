@@ -150,6 +150,55 @@ export interface PreviewBuilderStatus {
   machineId?: string;
   machineState?: string;
   createdAt?: string;
+  cleanup?: { status: string; detail: string };
+}
+
+export async function listFailedAppSetups(
+  token: string,
+  orgSlug: string,
+  hostApp = BUILDER_HOST_APP,
+) {
+  const response = await fetch(builderMachinesUrl(undefined, hostApp), {
+    headers: builderAuthHeaders(token),
+    signal: AbortSignal.timeout(BUILDER_MAINTENANCE_TIMEOUT_MS),
+    cache: "no-store",
+  });
+  if (!response.ok)
+    throw new Error(`Could not read setup history: HTTP ${response.status}`);
+  const seen = new Set<string>();
+  return ((await response.json()) as BuilderMachineInfo[])
+    .sort(newestFirst)
+    .flatMap((machine) => {
+      const meta = machine.config?.metadata ?? {};
+      const appName = builderTargetApp(machine);
+      if (
+        !appName ||
+        !/^flyhub-app-[a-z0-9-]+-[a-f0-9]{12}$/.test(appName) ||
+        meta.flyhub_build_org !== orgSlug ||
+        seen.has(appName)
+      )
+        return [];
+      seen.add(appName);
+      if (meta.flyhub_build_status !== "failed") return [];
+      return [
+        {
+          appName,
+          name: meta.flyhub_build_name || appName,
+          repository: meta.flyhub_build_repo || "",
+          commitSha: meta.flyhub_build_ref || "",
+          jobId: machine.id,
+          error:
+            meta.flyhub_last_error ||
+            "Setup failed. Open the job to inspect its machine events.",
+          cleanup: {
+            status: meta.flyhub_cleanup_status || "needs_attention",
+            detail:
+              meta.flyhub_cleanup_detail ||
+              "Cleanup has not been confirmed. Check for remaining resources.",
+          },
+        },
+      ];
+    });
 }
 
 function defaultTagFor(repo: string, ref: string): string {
@@ -217,6 +266,8 @@ function shouldDestroyBuilder(
     machine.config?.env?.APP_IMAGE_JOB ||
     machine.config?.metadata?.flyhub_image_action
   )
+    return false;
+  if (machine.config?.metadata?.flyhub_cleanup_status === "needs_attention")
     return false;
   const samePreview = builderTargetApp(machine) === targetAppName;
   return samePreview
@@ -320,6 +371,7 @@ export async function getPreviewBuilderStatus(
       if (exitCode === 0) state = "completed";
     }
     let error: string | undefined;
+    let cleanup: PreviewBuilderStatus["cleanup"];
     if (state === "failed" && latest.id) {
       const detail = await fetch(
         `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(hostApp)}/machines/${encodeURIComponent(latest.id)}/metadata`,
@@ -338,6 +390,14 @@ export async function getPreviewBuilderStatus(
         error = detail.flyhub_last_error.slice(-8_000);
       else if (typeof exitCode === "number")
         error = `Fly builder process exited with code ${exitCode}.`;
+      if (typeof detail?.flyhub_cleanup_status === "string")
+        cleanup = {
+          status: detail.flyhub_cleanup_status,
+          detail:
+            typeof detail.flyhub_cleanup_detail === "string"
+              ? detail.flyhub_cleanup_detail
+              : "Cleanup has not been confirmed.",
+        };
     }
 
     // Also scrub legacy workers and workers killed before their finally block.
@@ -363,6 +423,7 @@ export async function getPreviewBuilderStatus(
     }
     return {
       state,
+      cleanup,
       error,
       machineId: latest.id,
       machineState: latest.state,
@@ -586,6 +647,9 @@ export async function spawnAppBuilder(
         flyhub_build_kind: "app",
         flyhub_build_app: input.appName,
         flyhub_build_ref: input.ref,
+        flyhub_build_org: input.flyOrgSlug,
+        flyhub_build_repo: input.repo,
+        flyhub_build_name: input.flyHubName ?? input.appName,
       },
       env: {
         KODY_BUILDER_KIND: "app",

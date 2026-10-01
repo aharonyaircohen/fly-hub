@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@kody-ade/base/ui/button";
 import { Input } from "@kody-ade/base/ui/input";
+import { Checkbox } from "@kody-ade/base/ui/checkbox";
 import { SavedAppsManager, type SaveAppRequest } from "./SavedAppsManager";
 
 type Plan = {
@@ -32,6 +33,11 @@ type App = {
   passwordAvailable: boolean;
   appCredentialName: string | null;
   alwaysOn: boolean;
+};
+type FailedSetup = {
+  appName: string; name: string; repository: string; commitSha: string;
+  jobId?: string; error: string; remainingResources: boolean;
+  cleanup: { status: string; detail: string };
 };
 type Pending = {
   appName: string;
@@ -174,6 +180,8 @@ export function FlyAppsManager() {
   const [rootDirectory, setRootDirectory] = useState("");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [apps, setApps] = useState<App[]>([]);
+  const [failedSetups, setFailedSetups] = useState<FailedSetup[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [saveRequest, setSaveRequest] = useState<SaveAppRequest | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [pendingStatus, setPendingStatus] = useState<
@@ -369,6 +377,8 @@ export function FlyAppsManager() {
       try {
         const data = await json<{
           apps: App[];
+          failedSetups?: FailedSetup[];
+          historyError?: string | null;
           pendingStatus: { state: "building" | "failed" } | null;
           pendingReady: boolean;
         }>(
@@ -379,6 +389,8 @@ export function FlyAppsManager() {
         );
         if (active) {
           setApps(data.apps);
+          setFailedSetups(data.failedSetups ?? []);
+          setHistoryError(data.historyError ?? null);
           setPendingStatus(data.pendingStatus?.state ?? null);
           setPendingReady(data.pendingReady);
         }
@@ -695,6 +707,7 @@ export function FlyAppsManager() {
       </header>
       <div
         role="tablist"
+        tabIndex={-1}
         aria-label="Apps"
         className="flex border-b"
         onKeyDown={(event) => {
@@ -716,7 +729,8 @@ export function FlyAppsManager() {
         }}
       >
         {appTabs.map((tab) => (
-          <button
+          <Button
+            variant="ghost"
             key={tab.id}
             id={`apps-tab-${tab.id}`}
             type="button"
@@ -725,10 +739,10 @@ export function FlyAppsManager() {
             aria-controls={`apps-panel-${tab.id}`}
             tabIndex={activeTab === tab.id ? 0 : -1}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex-1 border-b-2 px-3 py-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${activeTab === tab.id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+            className={`h-auto flex-1 rounded-none border-b-2 px-3 py-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${activeTab === tab.id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
           >
             {tab.label}
-          </button>
+          </Button>
         ))}
       </div>
       {error && (
@@ -749,11 +763,12 @@ export function FlyAppsManager() {
           <p className="text-sm text-muted-foreground">Select a run to see its current Eve, build, and machine status. Runs stay here in this browser for up to 30 days.</p>
           <div className="space-y-2">
             {runs.map((run) => (
-              <button
+              <Button
+                variant="ghost"
                 key={run.handle}
                 type="button"
                 onClick={() => selectRun(run)}
-                className={`w-full rounded-md border p-3 text-left text-sm ${agentHandle === run.handle ? "border-primary bg-muted/40" : "bg-background"}`}
+                className={`block h-auto w-full whitespace-normal rounded-md border p-3 text-left text-sm ${agentHandle === run.handle ? "border-primary bg-muted/40" : "bg-background"}`}
               >
                 <span className="block font-medium break-all">{run.url}</span>
                 <span className="block text-muted-foreground">
@@ -762,7 +777,7 @@ export function FlyAppsManager() {
                   {run.runId ? ` · ${run.runId}` : ""}
                 </span>
                 {run.checkedAt && <span className="block text-xs text-muted-foreground">Checked {new Date(run.checkedAt).toLocaleString()}</span>}
-              </button>
+              </Button>
             ))}
           </div>
         </section>
@@ -818,10 +833,9 @@ export function FlyAppsManager() {
         </label>
         <div className="flex flex-wrap gap-2">
           <label className="flex w-full items-start gap-3 rounded-md border p-3 text-sm">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={alwaysOn}
-              onChange={(event) => setAlwaysOn(event.target.checked)}
+              onCheckedChange={(checked) => setAlwaysOn(checked === true)}
               className="mt-1"
             />
             <span>
@@ -1242,6 +1256,7 @@ export function FlyAppsManager() {
       >
         <h2 className="text-lg font-semibold">Deployed apps</h2>
         {notice && <p role="status" className="text-sm">{notice}</p>}
+        {historyError && <p role="alert" className="text-sm text-destructive">{historyError}</p>}
         {deleteApp && (
           <div ref={deleteDialog} role="alertdialog" aria-labelledby="delete-app-title" aria-describedby="delete-app-description" className="rounded-xl border border-destructive/40 bg-card p-4 text-sm space-y-3">
             <h3 id="delete-app-title" className="font-semibold">Delete {deleteApp.name}?</h3>
@@ -1349,6 +1364,23 @@ export function FlyAppsManager() {
             )}
           </div>
         ))}
+        {failedSetups.length > 0 && <section className="space-y-3" aria-label="Failed setups">
+          <h3 className="font-semibold">Failed setups</h3>
+          {failedSetups.map((setup) => <div key={setup.appName} className="rounded-xl border border-destructive/30 bg-card p-4 text-sm space-y-2">
+            <strong>{setup.name}</strong>
+            <p className="text-destructive">Setup failed</p>
+            <p>{setup.cleanup.detail}</p>
+            <details><summary className="cursor-pointer">Job details</summary>
+              <p className="mt-2 break-all">Job: {setup.jobId ?? "unavailable"} · App: {setup.appName}</p>
+              <p>{setup.repository} · {setup.commitSha.slice(0, 12)}</p>
+              <pre className="mt-2 whitespace-pre-wrap break-all text-xs">{setup.error}</pre>
+            </details>
+            {setup.remainingResources && <Button type="button" variant="outline" disabled={busy !== null} onClick={() => {
+              setDeleteApp({ ...setup, state: "failed", url: `https://${setup.appName}.fly.dev`, passwordAvailable: false, appCredentialName: null, alwaysOn: false });
+              setDeleteError(""); setNotice("");
+            }}>Remove remaining resources</Button>}
+          </div>)}
+        </section>}
       </section>
       <div
         id="apps-panel-saved"

@@ -194,9 +194,10 @@ export async function destroyMachine(
 export async function destroyApp(
   appName: string,
   token: string,
+  force = false,
 ): Promise<void> {
   const res = await fetch(
-    `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(appName)}`,
+    `${FLY_MACHINES_BASE}/apps/${encodeURIComponent(appName)}${force ? "?force=true" : ""}`,
     {
       method: "DELETE",
       headers: authHeader(token),

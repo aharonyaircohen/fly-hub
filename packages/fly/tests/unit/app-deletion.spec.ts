@@ -33,6 +33,65 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe("FlyHub app deletion", () => {
+  it("removes a recorded failed setup even when only its runtime remains", async () => {
+    vi.mocked(listAppsByPrefix).mockResolvedValue([runtime]);
+    vi.mocked(listMachines).mockImplementation(async (name) =>
+      name === "kody-preview-builder"
+        ? [
+            {
+              id: "failed-worker",
+              state: "stopped",
+              region: "lhr",
+              config: {
+                metadata: {
+                  flyhub_build_app: app,
+                  flyhub_build_org: "personal",
+                  flyhub_build_status: "failed",
+                },
+              },
+            },
+          ]
+        : [],
+    );
+    const fetch = vi.fn(
+      async (_url, init) =>
+        new Response("", {
+          status: init?.method === "GET" || !init?.method ? 404 : 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    expect(await deleteFlyHubApp(app, cfg)).toMatchObject({
+      deletedApps: [runtime],
+      backupsKept: true,
+    });
+    expect(
+      fetch.mock.calls
+        .filter(([, init]) => init?.method === "DELETE")
+        .map(([url]) => url),
+    ).toEqual([`https://api.machines.dev/v1/apps/${runtime}?force=true`]);
+  });
+  it("does not accept a failed job in another organization as ownership evidence", async () => {
+    vi.mocked(listMachines).mockResolvedValue([
+      {
+        id: "wrong-org",
+        state: "stopped",
+        region: "lhr",
+        config: {
+          metadata: {
+            flyhub_build_app: app,
+            flyhub_build_org: "another-org",
+            flyhub_build_status: "failed",
+          },
+        },
+      },
+    ]);
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    await expect(deleteFlyHubApp(app, cfg)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("removes only the selected runtime and gateway and keeps GHCR backups", async () => {
     const fetch = vi.fn(
       async (_url, init) =>

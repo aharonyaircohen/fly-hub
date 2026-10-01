@@ -46,6 +46,13 @@ export async function clearAppBuilderCredentials(input: {
           flyhub_build_kind: "app",
           flyhub_build_app: env.APP_NAME || metadata.flyhub_build_app || "",
           flyhub_build_ref: env.REF || metadata.flyhub_build_ref || "",
+          flyhub_build_org: env.FLY_ORG_SLUG || metadata.flyhub_build_org || "",
+          flyhub_build_repo: env.REPO || metadata.flyhub_build_repo || "",
+          flyhub_build_name:
+            env.FLY_HUB_NAME ||
+            metadata.flyhub_build_name ||
+            env.APP_NAME ||
+            "",
           flyhub_build_status: input.status,
         },
       },
