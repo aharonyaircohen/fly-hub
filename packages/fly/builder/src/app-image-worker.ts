@@ -36,10 +36,10 @@ import {
   createApp,
   allocatePrivateIp,
   allocateSharedIps,
-  startMachine,
   waitForMachineStarted,
 } from "./fly-api.ts";
 import { runtimeAppName } from "./app-builder-names.ts";
+import { startRestoredMachine } from "./app-image-startup.ts";
 
 type Config = Record<string, any>;
 type Machine = { id: string; state: string; region: string; config: Config };
@@ -773,6 +773,7 @@ async function create() {
       );
       await writeOci(`${work}/${saved.role}-image`, root, saved.imageConfig);
       const image = `registry.fly.io/${name}:saved-${job.id}`;
+      await progress(`uploading-${saved.role}-image`);
       await copyImage(`oci:${work}/${saved.role}-image`, `docker://${image}`);
       const mounts: Array<{ volume: string; path: string }> = [];
       for (const [i, volume] of saved.volumes.entries()) {
@@ -833,6 +834,7 @@ async function create() {
       let machine: { id: string };
       if (mounts.length) {
         // Seed the empty volumes before starting the app, so mounts cannot hide saved data.
+        await progress(`starting-${saved.role}-volume-loader`);
         machine = await api(`/apps/${name}/machines`, "POST", {
           region: job.region,
           config: {
@@ -843,8 +845,8 @@ async function create() {
             guest: { cpu_kind: "shared", cpus: 1, memory_mb: 512 },
           },
         });
-        await startMachine(name, machine.id, flyToken);
-        await waitForMachineStarted(name, machine.id, flyToken);
+        await startRestoredMachine(name, machine.id, flyToken);
+        await progress(`restoring-${saved.role}-data`);
         for (const [i, volume] of saved.volumes.entries()) {
           const archive = `${work}/${saved.role}-data-${i}.tgz`;
           await decryptArchive(
@@ -877,14 +879,16 @@ async function create() {
             `/bin/sh -c ${shellQuote(`tar --xattrs --acls -xzf /tmp/flyhub-data-${i}.tgz -C ${shellQuote(volume.path)} && rm /tmp/flyhub-data-${i}.tgz`)}`,
           ]);
         }
+        await progress(`starting-restored-${saved.role}`);
         await api(`/apps/${name}/machines/${machine.id}`, "POST", { config });
-      } else
+      } else {
+        await progress(`starting-restored-${saved.role}`);
         machine = await api(`/apps/${name}/machines`, "POST", {
           region: job.region,
           config,
         });
-      await startMachine(name, machine.id, flyToken);
-      await waitForMachineStarted(name, machine.id, flyToken);
+      }
+      await startRestoredMachine(name, machine.id, flyToken);
     }
     await progress("checking-restored-app");
     await waitHealthy(app);

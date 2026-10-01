@@ -28,6 +28,10 @@ removes its incomplete apps; failed cleanup reports the exact app names.
 
 The long-running operation runs in the existing Fly builder host. Its status and
 failure phase are retained in Fly machine metadata and shown under Saved apps.
+Restored machines have up to ten minutes to pull and boot their image. Progress
+separates image upload, volume loading, and runtime/gateway startup. Startup
+failures report the destination app, machine ID, observed state, and last start
+HTTP status so the failure can be located without guessing.
 Job credentials are removed from the worker after completion. If a worker is
 killed, the next status read records the interruption, removes its credentials,
 and attempts to remove any incomplete restored apps. Publish the
