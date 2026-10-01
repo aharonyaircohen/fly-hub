@@ -15,9 +15,26 @@ import {
   registryBearer,
   registryManifest,
   assertPrivatePackage,
+  deleteSavedAppVersion,
 } from "../../builder/src/app-image-registry";
 
 export { listSavedApps };
+export async function deleteSavedApp(
+  cfg: FlyPreviewConfig,
+  registry: RegistryConnection,
+  id: string,
+) {
+  const imageRef = savedImageRef(registry.user, id);
+  const jobs = await savedAppJobs(cfg, registry, Infinity);
+  const active = jobs.find(
+    (job) => job.imageRef === imageRef && job.status === "working",
+  );
+  if (active)
+    throw new Error(
+      `This saved version is being used by job ${active.jobId}. Wait for it to finish before deleting.`,
+    );
+  await deleteSavedAppVersion(registry.user, registry.token, id);
+}
 export type RegistryConnection = { user: string; token: string };
 export type SavedAppJob = {
   jobId: string;
@@ -44,6 +61,7 @@ function metadata(machine: { config?: Record<string, unknown> }) {
 export async function savedAppJobs(
   cfg: FlyPreviewConfig,
   registry: RegistryConnection,
+  limit = 20,
 ): Promise<SavedAppJob[]> {
   const machines = await listMachines(hostApp(), cfg);
   const owned = machines
@@ -55,7 +73,7 @@ export async function savedAppJobs(
       );
     })
     .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
-    .slice(0, 20);
+    .slice(0, limit);
   return Promise.all(
     owned.map(async (machine) => {
       const response = await fetch(

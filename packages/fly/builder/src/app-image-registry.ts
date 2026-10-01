@@ -2,6 +2,7 @@ import {
   savedAppFromManifest,
   savedAppPackage,
   type SavedApp,
+  savedIdPattern,
 } from "./app-image-format.ts";
 
 export async function registryBearer(
@@ -48,7 +49,10 @@ export async function registryManifest(
     },
   );
   if (!response.ok) throw new Error("Saved app image could not be read.");
-  return response.json() as Promise<{ annotations?: Record<string, string> }>;
+  return response.json() as Promise<{
+    annotations?: Record<string, string>;
+    layers?: Array<{ size?: number }>;
+  }>;
 }
 export async function listSavedApps(
   user: string,
@@ -131,4 +135,67 @@ export async function assertPrivatePackage(
       "Saved apps must use your private flyhub-saved-apps GHCR package.",
     );
   return true;
+}
+
+export async function deleteSavedAppVersion(
+  user: string,
+  token: string,
+  id: string,
+) {
+  if (!savedIdPattern.test(id)) throw new Error("Invalid saved app version.");
+  if (!(await assertPrivatePackage(user, token, true)))
+    throw new Error("Saved app version not found.");
+  const tag = `app-${id}`;
+  const bearer = await registryBearer(user, token);
+  const manifest = await registryManifest(user, bearer, tag);
+  if (!savedAppFromManifest(manifest, user, tag))
+    throw new Error("This is not a FlyHub saved app version.");
+  const headers = {
+    authorization: `Bearer ${token}`,
+    accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const base = `https://api.github.com/user/packages/container/${savedAppPackage}/versions`;
+  let match:
+    { id: number; metadata?: { container?: { tags?: string[] } } } | undefined;
+  for (let page = 1; page <= 10; page++) {
+    const response = await fetch(`${base}?per_page=100&page=${page}`, {
+      headers,
+      signal: AbortSignal.timeout(20_000),
+      cache: "no-store",
+    });
+    if (!response.ok)
+      throw new Error(
+        "Could not read GitHub package versions. Check read:packages permission.",
+      );
+    const versions = (await response.json()) as Array<{
+      id: number;
+      metadata?: { container?: { tags?: string[] } };
+    }>;
+    match = versions.find((version) =>
+      version.metadata?.container?.tags?.includes(tag),
+    );
+    if (match || versions.length < 100) break;
+  }
+  if (!match || !Number.isSafeInteger(match.id) || match.id <= 0)
+    throw new Error(
+      "Saved version could not be matched to a GitHub package version. Refresh saved apps and try again.",
+    );
+  if (match.metadata?.container?.tags?.some((other) => other !== tag))
+    throw new Error(
+      "This image is shared by other tags. Manage it in GitHub to avoid deleting another saved version.",
+    );
+  const response = await fetch(`${base}/${match.id}`, {
+    method: "DELETE",
+    headers,
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (response.status === 403 || response.status === 401)
+    throw new Error(
+      "GitHub denied deletion. Update your GitHub connection with a classic token that has read:packages, write:packages, and delete:packages permissions, then retry.",
+    );
+  if (!response.ok && response.status !== 404)
+    throw new Error(
+      `Could not delete this saved version (GitHub HTTP ${response.status}).`,
+    );
 }

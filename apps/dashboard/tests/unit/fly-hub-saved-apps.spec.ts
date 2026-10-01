@@ -5,17 +5,19 @@ import {
   setRegistrySession,
   readRegistrySession,
 } from "../../src/dashboard/lib/fly-hub-registry-session";
-import { GET, POST } from "../../app/api/fly-hub/apps/saved/route";
+import { GET, POST, DELETE } from "../../app/api/fly-hub/apps/saved/route";
 import { POST as connectRegistry } from "../../app/api/fly-hub/registry/route";
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   jobs: vi.fn(),
   start: vi.fn(),
+  remove: vi.fn(),
 }));
 vi.mock("@kody-ade/fly/hub/saved-apps", () => ({
   listSavedApps: mocks.list,
   savedAppJobs: mocks.jobs,
   startSavedAppJob: mocks.start,
+  deleteSavedApp: mocks.remove,
 }));
 const origin = "https://flyhub.example";
 function request(body?: unknown, withRegistry = true, withOrigin = true) {
@@ -88,6 +90,25 @@ describe("FlyHub saved app endpoints", () => {
       (await POST(request({ action: "delete", app: "test" }))).status,
     ).toBe(400);
     expect(mocks.start).not.toHaveBeenCalled();
+  });
+  it("requires same-origin confirmation and registry access before deleting a version", async () => {
+    const id = "a".repeat(32);
+    expect(
+      (await DELETE(request({ id, confirmId: id }, true, false))).status,
+    ).toBe(403);
+    expect((await DELETE(request({ id, confirmId: id }, false))).status).toBe(
+      401,
+    );
+    expect((await DELETE(request({ id, confirmId: "wrong" }))).status).toBe(
+      400,
+    );
+    expect(mocks.remove).not.toHaveBeenCalled();
+    expect((await DELETE(request({ id, confirmId: id }))).status).toBe(200);
+    expect(mocks.remove).toHaveBeenCalledWith(
+      expect.objectContaining({ orgSlug: "personal" }),
+      { user: "owner", token: "private-registry-token" },
+      id,
+    );
   });
   it("rejects GitHub credentials without registry write permission", async () => {
     const original = global.fetch;

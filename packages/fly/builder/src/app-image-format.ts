@@ -18,6 +18,7 @@ export type SavedApp = {
   sourceApp: string;
   createdAt: string;
   imageRef: string;
+  sizeBytes?: number;
 };
 
 export function savedImageRef(user: string, id: string): string {
@@ -27,7 +28,10 @@ export function savedImageRef(user: string, id: string): string {
 }
 
 export function savedAppFromManifest(
-  manifest: { annotations?: Record<string, string> },
+  manifest: {
+    annotations?: Record<string, string>;
+    layers?: Array<{ size?: number }>;
+  },
   user: string,
   tag: string,
 ): SavedApp | null {
@@ -45,6 +49,20 @@ export function savedAppFromManifest(
     sourceApp: a["app.flyhub.source"]!,
     createdAt: a["org.opencontainers.image.created"] ?? "",
     imageRef: savedImageRef(user, id),
+    ...(manifest.layers?.length &&
+    manifest.layers.every(
+      (layer) =>
+        typeof layer.size === "number" &&
+        Number.isFinite(layer.size) &&
+        layer.size >= 0,
+    )
+      ? {
+          sizeBytes: manifest.layers.reduce(
+            (total, layer) => total + layer.size!,
+            0,
+          ),
+        }
+      : {}),
   };
 }
 

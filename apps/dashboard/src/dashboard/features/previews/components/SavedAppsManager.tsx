@@ -9,6 +9,7 @@ type SavedApp = {
   sourceApp: string;
   createdAt: string;
   imageRef: string;
+  sizeBytes?: number;
 };
 type Job = {
   jobId: string;
@@ -81,6 +82,11 @@ export function SavedAppsManager({
   const [busy, setBusy] = useState(false);
   const [createId, setCreateId] = useState<string | null>(null);
   const [name, setName] = useState("");
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [updateConnection, setUpdateConnection] = useState(false);
   const handled = useRef<number | null>(null);
   const savedSection = useRef<HTMLElement | null>(null);
   async function load() {
@@ -202,6 +208,7 @@ export function SavedAppsManager({
       });
       setUser(result.user);
       setToken("");
+      setUpdateConnection(false);
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Could not connect GitHub.",
@@ -231,6 +238,45 @@ export function SavedAppsManager({
       setBusy(false);
     }
   }
+  async function removeSavedVersion(id: string) {
+    setBusy(true);
+    setDeleting(true);
+    setDeleteError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/fly-hub/apps/saved", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, confirmId: id }),
+      });
+      const result = await response.json();
+      if (!response.ok)
+        throw new Error(result.error || "Could not delete saved version.");
+      setSaved((current) => current.filter((app) => app.id !== id));
+      if (createId === id) setCreateId(null);
+      setDeleteId(null);
+      setNotice("Saved version deleted. Deployed apps were kept.");
+    } catch (cause) {
+      setDeleteError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not delete saved version.",
+      );
+    } finally {
+      setBusy(false);
+      setDeleting(false);
+    }
+  }
+  const groups = [
+    ...saved
+      .reduce((bySource, app) => {
+        const group = bySource.get(app.sourceApp) ?? [];
+        group.push(app);
+        bySource.set(app.sourceApp, group);
+        return bySource;
+      }, new Map<string, SavedApp[]>())
+      .values(),
+  ];
   return (
     <section
       ref={savedSection}
@@ -250,7 +296,12 @@ export function SavedAppsManager({
           {error}
         </p>
       )}
-      {!user ? (
+      {notice && (
+        <p role="status" className="text-sm">
+          {notice}
+        </p>
+      )}
+      {!user || updateConnection ? (
         <form
           className="space-y-2 rounded-xl border p-4"
           onSubmit={(e) => {
@@ -260,12 +311,13 @@ export function SavedAppsManager({
         >
           <p className="text-sm">
             Connect your GitHub account with a classic token that has{" "}
-            <code>write:packages</code> permission. The token is stored
-            encrypted.
+            <code>write:packages</code> permission to save and restore, plus{" "}
+            <code>delete:packages</code> to delete saved versions. The token is
+            stored encrypted.
           </p>
           <a
             className="text-sm underline"
-            href="https://github.com/settings/tokens/new?scopes=write:packages&description=FlyHub%20saved%20apps"
+            href="https://github.com/settings/tokens/new?scopes=write:packages,delete:packages&description=FlyHub%20saved%20apps"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -285,6 +337,19 @@ export function SavedAppsManager({
           <Button type="submit" disabled={busy || !token}>
             {busy ? "Connecting…" : "Connect GitHub"}
           </Button>
+          {user && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setUpdateConnection(false);
+                setToken("");
+              }}
+            >
+              Cancel
+            </Button>
+          )}
         </form>
       ) : (
         <div className="flex flex-wrap items-center gap-3 text-sm">
@@ -292,6 +357,14 @@ export function SavedAppsManager({
             Saving privately to{" "}
             <code>ghcr.io/{user.toLowerCase()}/flyhub-saved-apps</code>
           </span>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy || activeJobs.length > 0}
+            onClick={() => setUpdateConnection(true)}
+          >
+            Update GitHub connection
+          </Button>
           <Button
             type="button"
             variant="outline"
@@ -395,61 +468,159 @@ export function SavedAppsManager({
           No saved apps yet. Open the Deployed apps tab and click Save app.
         </p>
       )}
-      {saved.map((app) => (
-        <div
-          key={app.id}
-          className="rounded-xl border bg-card p-4 text-sm space-y-2"
+      {groups.map((group) => (
+        <section
+          key={group[0].sourceApp}
+          aria-label={`Saved versions of ${group[0].name}`}
+          className="space-y-3 rounded-xl border p-4"
         >
-          <div className="flex flex-wrap justify-between gap-2">
-            <strong>{app.name}</strong>
-            <span>{new Date(app.createdAt).toLocaleString()}</span>
+          <div>
+            <h3 className="font-semibold">{group[0].name}</h3>
+            <p className="text-sm text-muted-foreground">
+              {group.length} saved {group.length === 1 ? "version" : "versions"}{" "}
+              · newest first
+            </p>
           </div>
-          <p className="text-muted-foreground break-all">{app.imageRef}</p>
-          {createId === app.id ? (
-            <form
-              className="space-y-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void create();
-              }}
+          {group.map((app) => (
+            <div
+              key={app.id}
+              data-saved-version={app.id}
+              className="rounded-xl border bg-card p-4 text-sm space-y-2"
             >
-              <label htmlFor={`saved-app-name-${app.id}`} className="block">
-                New app name
-              </label>
-              <Input
-                id={`saved-app-name-${app.id}`}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                maxLength={80}
-                required
-              />
-              <div className="flex gap-2">
-                <Button type="submit" disabled={busy || !name.trim()}>
-                  Create app
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setCreateId(null)}
-                >
-                  Cancel
-                </Button>
+              <div className="flex flex-wrap justify-between gap-2">
+                <strong>
+                  Saved {new Date(app.createdAt).toLocaleString()}
+                </strong>
+                {typeof app.sizeBytes === "number" && (
+                  <span>
+                    {app.sizeBytes >= 1024 ** 3
+                      ? `${(app.sizeBytes / 1024 ** 3).toFixed(1)} GB`
+                      : `${Math.max(1, Math.round(app.sizeBytes / 1024 ** 2))} MB`}
+                  </span>
+                )}
               </div>
-            </form>
-          ) : (
-            <Button
-              type="button"
-              variant="outline"
-              disabled={busy || activeJobs.length > 0}
-              onClick={() => {
-                setCreateId(app.id);
-                setName(`${app.name} copy`.slice(0, 80));
-              }}
-            >
-              Create from saved app
-            </Button>
-          )}
-        </div>
+              <details className="text-muted-foreground">
+                <summary className="cursor-pointer">Version details</summary>
+                <p className="break-all">{app.imageRef}</p>
+                <p className="break-all">Source app: {app.sourceApp}</p>
+              </details>
+              {createId === app.id ? (
+                <form
+                  className="space-y-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void create();
+                  }}
+                >
+                  <label htmlFor={`saved-app-name-${app.id}`} className="block">
+                    New app name
+                  </label>
+                  <Input
+                    id={`saved-app-name-${app.id}`}
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    maxLength={80}
+                    required
+                  />
+                  <div className="flex gap-2">
+                    <Button type="submit" disabled={busy || !name.trim()}>
+                      Create app
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setCreateId(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </form>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={
+                      busy || activeJobs.length > 0 || deleteId !== null
+                    }
+                    onClick={() => {
+                      setCreateId(app.id);
+                      setName(`${app.name} copy`.slice(0, 80));
+                    }}
+                  >
+                    Create from saved app
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="text-destructive"
+                    disabled={
+                      busy ||
+                      activeJobs.some((job) => job.imageRef === app.imageRef)
+                    }
+                    onClick={() => {
+                      setDeleteId(app.id);
+                      setDeleteError("");
+                      setNotice("");
+                    }}
+                  >
+                    Delete saved version
+                  </Button>
+                </div>
+              )}
+              {deleteId === app.id && (
+                <div
+                  role="alertdialog"
+                  aria-labelledby={`delete-saved-title-${app.id}`}
+                  className="rounded-md border border-destructive/40 p-3 space-y-2"
+                >
+                  <h4
+                    id={`delete-saved-title-${app.id}`}
+                    className="font-semibold"
+                  >
+                    Delete this saved version?
+                  </h4>
+                  <p>
+                    This removes the backup of {app.name} saved on{" "}
+                    {new Date(app.createdAt).toLocaleString()} from GitHub. You
+                    will no longer be able to restore from it. Deployed apps and
+                    other saved versions will be kept.
+                  </p>
+                  {deleteError && (
+                    <p role="alert" className="text-destructive">
+                      {deleteError}
+                    </p>
+                  )}
+                  {deleting && (
+                    <p role="status">Deleting saved version from GitHub…</p>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      disabled={busy}
+                      onClick={() => void removeSavedVersion(app.id)}
+                    >
+                      {deleting ? "Deleting…" : "Delete version permanently"}
+                    </Button>
+                    <Button
+                      autoFocus
+                      type="button"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => {
+                        setDeleteId(null);
+                        setDeleteError("");
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
       ))}
     </section>
   );

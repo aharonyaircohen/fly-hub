@@ -19,6 +19,20 @@ encrypted backup images: use FlyHub to restore them, rather than `docker run`.
 Keep the dashboard's `KODY_MASTER_KEY` backed up; without it snapshots cannot be
 decrypted. Other people cannot restore these snapshots just by pulling the image.
 
+Saved versions are grouped by source app and show save dates and encrypted image
+sizes. **Delete saved version** requires confirmation and a classic GitHub token
+with `read:packages` and `delete:packages` in addition to the save permission.
+Use **Update GitHub connection** to replace a token that cannot delete packages.
+FlyHub resolves the exact tag to its private GHCR package version ID; it never
+deletes the entire package or a version shared by other tags. Active save or
+restore jobs block deletion of the version they use. Deployed apps are retained.
+
+**Deployed apps → Delete app** requires confirmation and deletes its runtime and
+password gateway, including their machines, volumes, and Fly app resources.
+Saved GHCR versions and external services are retained. An active setup, save,
+or restore blocks deletion. The runtime is removed first so a failure removing
+the gateway can be retried; errors name the failed step and apps already removed.
+
 Restore creates a new app and runtime, rebuilds the images from the saved files,
 creates and fills new volumes before startup, restores app credentials, and
 generates a new outer FlyHub password. The app's existing internal login is kept.
@@ -35,7 +49,7 @@ HTTP status so the failure can be located without guessing.
 Job credentials are removed from the worker after completion. If a worker is
 killed, the next status read records the interruption, removes its credentials,
 and attempts to remove any incomplete restored apps. Publish the
-builder image after editing `packages/fly/builder/src/app-image-*.ts`, set
+builder image after changing snapshot export or restore worker behavior, set
 `FLY_HUB_BUILDER_IMAGE` on the dashboard, and redeploy the dashboard.
 
 The initial implementation supports FlyHub apps with one runtime and one password

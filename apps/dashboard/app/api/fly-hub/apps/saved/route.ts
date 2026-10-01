@@ -4,9 +4,11 @@ import {
   listSavedApps,
   savedAppJobs,
   startSavedAppJob,
+  deleteSavedApp,
 } from "@kody-ade/fly/hub/saved-apps";
 import { readRegistrySession } from "@dashboard/lib/fly-hub-registry-session";
 export const runtime = "nodejs";
+export const maxDuration = 120;
 const headers = { "Cache-Control": "no-store, private" };
 export async function GET(req: NextRequest) {
   const auth = requireHubConfig(req);
@@ -84,6 +86,46 @@ export async function POST(req: NextRequest) {
           error instanceof Error
             ? error.message
             : "Could not start saved app operation.",
+      },
+      { status: 400, headers },
+    );
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  if (!sameOrigin(req))
+    return NextResponse.json(
+      { error: "Invalid request origin." },
+      { status: 403, headers },
+    );
+  const auth = requireHubConfig(req);
+  if ("response" in auth) return auth.response;
+  const registry = readRegistrySession(req);
+  if (!registry)
+    return NextResponse.json(
+      { error: "Connect GitHub to delete saved versions." },
+      { status: 401, headers },
+    );
+  const body = await req.json().catch(() => null);
+  if (
+    typeof body?.id !== "string" ||
+    !/^[a-f0-9]{32}$/.test(body.id) ||
+    body.confirmId !== body.id
+  )
+    return NextResponse.json(
+      { error: "Confirm the saved version you want to delete." },
+      { status: 400, headers },
+    );
+  try {
+    await deleteSavedApp(auth.cfg, registry, body.id);
+    return NextResponse.json({ ok: true, deletedId: body.id }, { headers });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not delete saved version.",
       },
       { status: 400, headers },
     );

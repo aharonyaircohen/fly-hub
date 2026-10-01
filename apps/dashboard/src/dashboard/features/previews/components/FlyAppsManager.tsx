@@ -188,6 +188,13 @@ export function FlyAppsManager() {
   } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [deleteApp, setDeleteApp] = useState<App | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [notice, setNotice] = useState("");
+  const deleteDialog = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (deleteApp) deleteDialog.current?.scrollIntoView({behavior: "smooth", block: "center"});
+  }, [deleteApp]);
   const pendingAppName = pending?.appName;
 
   useEffect(() => {
@@ -630,6 +637,31 @@ export function FlyAppsManager() {
       setVisiblePassword({ appName, ...result });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not show password.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmDeleteApp() {
+    if (!deleteApp) return;
+    const app = deleteApp;
+    setBusy(`delete:${app.appName}`);
+    setDeleteError("");
+    setNotice("");
+    try {
+      await json(await fetch(`/api/fly-hub/apps/${encodeURIComponent(app.appName)}`, {
+        method: "DELETE",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({confirmApp: app.appName}),
+      }));
+      setApps(current => current.filter(item => item.appName !== app.appName));
+      if (visiblePassword?.appName === app.appName) setVisiblePassword(null);
+      if (pending?.appName === app.appName) setPending(null);
+      if (agentApp?.appName === app.appName) setAgentApp(null);
+      setDeleteApp(null);
+      setNotice(`${app.name} was deleted. Its saved backups were kept.`);
+    } catch (cause) {
+      setDeleteError(cause instanceof Error ? cause.message : "Could not delete app.");
     } finally {
       setBusy(null);
     }
@@ -1209,6 +1241,22 @@ export function FlyAppsManager() {
         className="space-y-3"
       >
         <h2 className="text-lg font-semibold">Deployed apps</h2>
+        {notice && <p role="status" className="text-sm">{notice}</p>}
+        {deleteApp && (
+          <div ref={deleteDialog} role="alertdialog" aria-labelledby="delete-app-title" aria-describedby="delete-app-description" className="rounded-xl border border-destructive/40 bg-card p-4 text-sm space-y-3">
+            <h3 id="delete-app-title" className="font-semibold">Delete {deleteApp.name}?</h3>
+            <p id="delete-app-description">This permanently removes the app, its password gateway, and their files, settings, credentials, and stored data. Saved backups will be kept. External services are not deleted.</p>
+            <p className="break-all text-muted-foreground">{deleteApp.url}</p>
+            {deleteError && <p role="alert" className="text-destructive">{deleteError}</p>}
+            {busy === `delete:${deleteApp.appName}` && <p role="status">Deleting app machines and stored data…</p>}
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="destructive" disabled={busy !== null} onClick={() => void confirmDeleteApp()}>
+                {busy === `delete:${deleteApp.appName}` ? "Deleting…" : "Delete app permanently"}
+              </Button>
+              <Button autoFocus type="button" variant="outline" disabled={busy !== null} onClick={() => {setDeleteApp(null); setDeleteError("");}}>Cancel</Button>
+            </div>
+          </div>
+        )}
         {apps.length === 0 && (
           <p className="text-sm text-muted-foreground">
             No Fly Hub apps in this organization yet.
@@ -1274,6 +1322,11 @@ export function FlyAppsManager() {
               >
                 {busy === `reset:${app.appName}` ? "Resetting…" : "Reset password"}
               </Button>
+              <Button type="button" variant="outline" className="text-destructive" disabled={busy !== null} onClick={() => {
+                setDeleteApp(app);
+                setDeleteError("");
+                setNotice("");
+              }}>Delete app</Button>
             </div>
             {visiblePassword?.appName === app.appName && (
               <div role="status" className="space-y-1">
